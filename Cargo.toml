@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["za2-core", "za2-capture", "za2-memory", "za2"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+debug = false

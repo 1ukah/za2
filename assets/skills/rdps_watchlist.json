@@ -1,0 +1,77 @@
+{
+  "calibrated": false,
+  "buffs": [
+    {
+      "skillId": 11780000,
+      "name": "Experienced Counterstrike",
+      "jobKo": "검성",
+      "kind": "self_party_amp",
+      "sourceRestriction": "party",
+      "exclusiveGroup": "gladiator_counter_templar_enrage_20260701",
+      "ampByLevel": null
+    },
+    {
+      "skillId": 12120000,
+      "name": "Taunt",
+      "jobKo": "수호성",
+      "kind": "target_debuff",
+      "sourceRestriction": "all_attackers",
+      "exclusiveGroup": null,
+      "ampByLevel": null
+    },
+    {
+      "skillId": 12780000,
+      "name": "Fury",
+      "jobKo": "수호성",
+      "kind": "self_party_amp",
+      "sourceRestriction": "party",
+      "exclusiveGroup": "gladiator_counter_templar_enrage_20260701",
+      "ampByLevel": null
+    },
+    {
+      "skillId": 15320000,
+      "name": "Delayed Explosion",
+      "jobKo": "마도성",
+      "kind": "target_debuff",
+      "sourceRestriction": "owner_only",
+      "exclusiveGroup": null,
+      "ampByLevel": null
+    },
+    {
+      "skillId": 17070000,
+      "name": "Chain of Torment",
+      "jobKo": "치유성",
+      "kind": "target_debuff",
+      "sourceRestriction": "all_attackers",
+      "exclusiveGroup": "target_damage_resistance_down_cleric_chanter_20260527",
+      "ampByLevel": null
+    },
+    {
+      "skillId": 17410000,
+      "name": "Light of Protection",
+      "jobKo": "치유성",
+      "kind": "self_party_amp",
+      "sourceRestriction": "party",
+      "exclusiveGroup": "protective_light_unyielding_mantra",
+      "ampByLevel": null
+    },
+    {
+      "skillId": 18190000,
+      "name": "Undefeated Mantra",
+      "jobKo": "호법성",
+      "kind": "self_party_amp",
+      "sourceRestriction": "party",
+      "exclusiveGroup": "protective_light_unyielding_mantra",
+      "ampByLevel": null
+    },
+    {
+      "skillId": 18780000,
+      "name": "Earth's Promise",
+      "jobKo": "호법성",
+      "kind": "target_debuff",
+      "sourceRestriction": "all_attackers",
+      "exclusiveGroup": "target_damage_resistance_down_cleric_chanter_20260527",
+      "ampByLevel": null
+    }
+  ]
+}

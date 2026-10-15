@@ -1,0 +1,7 @@
+[package]
+name = "za2-capture"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pcap = "2.2"

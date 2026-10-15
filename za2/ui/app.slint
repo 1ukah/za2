@@ -1,0 +1,2019 @@
+import { ListView } from "std-widgets.slint";
+
+export struct MeterRow {
+    id: int,
+    name: string,
+    class-name: string,
+    gear-score: string,
+    power: string,
+    damage: string,
+    dps: string,
+    share: float,
+    share-text: string,
+    heal: string,
+    crit: string,
+    local: bool,
+    estimated: bool,
+    color: color,
+}
+
+// One player in an overlay: damage or healing of the fight or the total.
+export struct OverlayRow {
+    name: string,
+    gear-score: string,
+    power: string,
+    value: string,
+    rate: string,
+    share: float,
+    share-text: string,
+    local: bool,
+    color: color,
+}
+
+// The settings of one meter overlay. metric: 0 damage, 1 healing. range: 0 current fight, 1 total. scope: 0 all, 1 group, 2 me.
+export struct OverlayConfigRow {
+    id: int,
+    enabled: bool,
+    metric: int,
+    range: int,
+    scope: int,
+}
+
+export struct SkillRow {
+    name: string,
+    total: string,
+    hits: string,
+    crit: string,
+    share: float,
+    min-max: string,
+}
+
+export struct MapTile {
+    image: image,
+    x: length,
+    y: length,
+    size: length,
+}
+
+export struct MapMarker {
+    x: length,
+    y: length,
+    size: length,
+    color: color,
+    live: bool,
+    // 1 above the player, -1 below, 0 level or unknown
+    level: int,
+}
+
+// One line of the resource or monster list. A header is a resource group that can be expanded.
+export struct FilterRow {
+    key: string,
+    label: string,
+    detail: string,
+    header: bool,
+    expanded: bool,
+    checked: bool,
+    // some but not all items of a group are selected
+    partial: bool,
+    color: color,
+}
+
+// The zodiak palette.
+export global Theme {
+    out property <color> background: #101114;
+    out property <color> chrome: #0c0d10;
+    out property <color> chrome-line: #22232a;
+    out property <color> surface: #191a20;
+    out property <color> surface-raised: #22232b;
+    out property <color> surface-hover: #272830;
+    out property <color> control-hover: #30313c;
+    out property <color> border: #2b2c35;
+    out property <color> control-border: #33343e;
+    out property <color> input: #111217;
+    out property <color> text: #eeeef2;
+    out property <color> muted: #9698a8;
+    out property <color> faint: #737585;
+    out property <color> accent: #a8a0ff;
+    out property <color> accent-hover: #bcb6ff;
+    out property <color> accent-ink: #17132b;
+    out property <color> accent-soft: #2a273c;
+    out property <color> danger: #f17b87;
+    out property <color> warn: #e5c68a;
+    out property <color> green: #68cba4;
+    out property <length> radius: 10px;
+}
+
+// Lucide icons (24 x 24), as zodiak uses them.
+global Icons {
+    out property <string> check: "M20 6 9 17l-5-5";
+    out property <string> user-round: "M 7 8 A 5 5 0 1 0 17 8 A 5 5 0 1 0 7 8 Z M20 21a8 8 0 0 0-16 0";
+    out property <string> monitor: "M 4 3 H 20 A 2 2 0 0 1 22 5 V 15 A 2 2 0 0 1 20 17 H 4 A 2 2 0 0 1 2 15 V 5 A 2 2 0 0 1 4 3 Z M 8 21 L 16 21 M 12 17 L 12 21";
+    out property <string> circle-dot: "M 2 12 A 10 10 0 1 0 22 12 A 10 10 0 1 0 2 12 Z M 11 12 A 1 1 0 1 0 13 12 A 1 1 0 1 0 11 12 Z";
+    out property <string> chevron-down: "M6 9 l6 6 6-6";
+    out property <string> chevron-right: "M9 18 l6-6-6-6";
+    out property <string> copy: "M 10 8 H 20 A 2 2 0 0 1 22 10 V 20 A 2 2 0 0 1 20 22 H 10 A 2 2 0 0 1 8 20 V 10 A 2 2 0 0 1 10 8 Z M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2";
+    out property <string> history: "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8 M3 3v5h5 M12 7v5l4 2";
+    out property <string> locate-fixed: "M 2 12 L 5 12 M 19 12 L 22 12 M 12 2 L 12 5 M 12 19 L 12 22 M 5 12 A 7 7 0 1 0 19 12 A 7 7 0 1 0 5 12 Z M 9 12 A 3 3 0 1 0 15 12 A 3 3 0 1 0 9 12 Z";
+    out property <string> lock-open: "M 5 11 H 19 A 2 2 0 0 1 21 13 V 20 A 2 2 0 0 1 19 22 H 5 A 2 2 0 0 1 3 20 V 13 A 2 2 0 0 1 5 11 Z M7 11V7a5 5 0 0 1 9.9-1";
+    out property <string> lock: "M 5 11 H 19 A 2 2 0 0 1 21 13 V 20 A 2 2 0 0 1 19 22 H 5 A 2 2 0 0 1 3 20 V 13 A 2 2 0 0 1 5 11 Z M7 11V7a5 5 0 0 1 10 0v4";
+    out property <string> map: "M14.106 5.553a2 2 0 0 0 1.788 0l3.659-1.83A1 1 0 0 1 21 4.619v12.764a1 1 0 0 1-.553.894l-4.553 2.277a2 2 0 0 1-1.788 0l-4.212-2.106a2 2 0 0 0-1.788 0l-3.659 1.83A1 1 0 0 1 3 19.381V6.618a1 1 0 0 1 .553-.894l4.553-2.277a2 2 0 0 1 1.788 0z M15 5.764v15 M9 3.236v15";
+    out property <string> minus: "M5 12h14";
+    out property <string> paw-print: "M 9 4 A 2 2 0 1 0 13 4 A 2 2 0 1 0 9 4 Z M 16 8 A 2 2 0 1 0 20 8 A 2 2 0 1 0 16 8 Z M 18 16 A 2 2 0 1 0 22 16 A 2 2 0 1 0 18 16 Z M9 10a5 5 0 0 1 5 5v3.5a3.5 3.5 0 0 1-6.84 1.045Q6.52 17.48 4.46 16.84A3.5 3.5 0 0 1 5.5 10Z";
+    out property <string> pickaxe: "M14.531 12.469 6.619 20.38a1 1 0 1 1-3-3l7.912-7.912 M15.686 4.314A12.5 12.5 0 0 0 5.461 2.958 1 1 0 0 0 5.58 4.71a22 22 0 0 1 6.318 3.393 M17.7 3.7a1 1 0 0 0-1.4 0l-4.6 4.6a1 1 0 0 0 0 1.4l2.6 2.6a1 1 0 0 0 1.4 0l4.6-4.6a1 1 0 0 0 0-1.4z M19.686 8.314a12.501 12.501 0 0 1 1.356 10.225 1 1 0 0 1-1.751-.119 22 22 0 0 0-3.393-6.319";
+    out property <string> play: "M 6 3 L 20 12 L 6 21 L 6 3 Z";
+    out property <string> plus: "M5 12h14 M12 5v14";
+    out property <string> rotate-ccw: "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8 M3 3v5h5";
+    out property <string> search: "M 3 11 A 8 8 0 1 0 19 11 A 8 8 0 1 0 3 11 Z M21 21 l-4.3-4.3";
+    out property <string> settings: "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z M 9 12 A 3 3 0 1 0 15 12 A 3 3 0 1 0 9 12 Z";
+    out property <string> square: "M 5 3 H 19 A 2 2 0 0 1 21 5 V 19 A 2 2 0 0 1 19 21 H 5 A 2 2 0 0 1 3 19 V 5 A 2 2 0 0 1 5 3 Z";
+    out property <string> swords: "M 14.5 17.5 L 3 6 L 3 3 L 6 3 L 17.5 14.5 M 13 19 L 19 13 M 16 16 L 20 20 M 19 21 L 21 19 M 14.5 6.5 L 18 3 L 21 3 L 21 6 L 17.5 9.5 M 5 14 L 9 18 M 7 17 L 4 20 M 3 19 L 5 21";
+    out property <string> volume-2: "M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z M16 9a5 5 0 0 1 0 6 M19.364 18.364a9 9 0 0 0 0-12.728";
+    out property <string> x: "M18 6 6 18 M6 6 l12 12";
+}
+
+// ---------------------------------------------------------------- building blocks
+
+component Icon inherits Path {
+    in property <color> tint: Theme.text;
+    width: 18px;
+    height: 18px;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    stroke: tint;
+    stroke-width: 1.4px;
+    stroke-line-cap: round;
+    fill: transparent;
+}
+
+component Card inherits Rectangle {
+    background: Theme.surface;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.border;
+}
+
+component Label inherits Text {
+    color: Theme.text;
+    vertical-alignment: center;
+}
+
+component Muted inherits Text {
+    color: Theme.muted;
+    font-size: 12px;
+    vertical-alignment: center;
+}
+
+component SectionTitle inherits Text {
+    color: Theme.faint;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+    vertical-alignment: center;
+}
+
+// Icon-only button: transparent until hovered, lavender when pressed (zodiak's icon-button).
+component IconButton inherits Rectangle {
+    in property <string> icon;
+    in property <bool> active;
+    in property <bool> boxed;
+    in property <length> icon-size: 18px;
+    callback clicked;
+    width: 34px;
+    height: 34px;
+    border-radius: 7px;
+    background: root.active ? Theme.accent-soft : touch.has-hover ? Theme.surface-hover : root.boxed ? Theme.surface-raised.with-alpha(0.94) : transparent;
+    border-width: root.boxed ? 1px : 0px;
+    border-color: Theme.control-border;
+    Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: root.icon-size;
+        height: root.icon-size;
+        commands: root.icon;
+        tint: root.active ? Theme.accent : touch.has-hover ? Theme.text : Theme.muted;
+    }
+    touch := TouchArea { clicked => { root.clicked(); } }
+}
+
+component TextButton inherits Rectangle {
+    in property <string> text;
+    in property <string> icon;
+    in property <bool> primary;
+    callback clicked;
+    height: 34px;
+    border-radius: 8px;
+    background: root.primary ? (touch.has-hover ? Theme.accent-hover : Theme.accent) : (touch.has-hover ? Theme.control-hover : Theme.surface-raised);
+    border-width: root.primary ? 0px : 1px;
+    border-color: Theme.control-border;
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 8px;
+        alignment: center;
+        if root.icon != "": Icon {
+            y: (parent.height - self.height) / 2;
+            width: 16px;
+            height: 16px;
+            commands: root.icon;
+            tint: root.primary ? Theme.accent-ink : Theme.text;
+        }
+        Text {
+            text: root.text;
+            color: root.primary ? Theme.accent-ink : #c5c6d1;
+            font-size: 12px;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+    touch := TouchArea { clicked => { root.clicked(); } }
+}
+
+// Segmented control, for choices that need words (All / Group / Me) or icons.
+component Segment inherits Rectangle {
+    in property <string> text;
+    in property <string> icon;
+    in property <bool> active;
+    callback clicked;
+    height: 28px;
+    border-radius: 6px;
+    background: root.active ? Theme.accent-soft : touch.has-hover ? Theme.surface-hover : transparent;
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        alignment: center;
+        if root.icon != "": Icon {
+            y: (parent.height - self.height) / 2;
+            width: 16px;
+            height: 16px;
+            commands: root.icon;
+            tint: root.active ? Theme.accent : Theme.muted;
+        }
+        if root.text != "": Text {
+            text: root.text;
+            color: root.active ? Theme.accent : Theme.muted;
+            font-size: 12px;
+            font-weight: root.active ? 600 : 400;
+            vertical-alignment: center;
+        }
+    }
+    touch := TouchArea { clicked => { root.clicked(); } }
+}
+
+component SegmentBar inherits Rectangle {
+    background: Theme.input;
+    border-radius: 9px;
+    border-width: 1px;
+    border-color: Theme.border;
+    height: 36px;
+}
+
+component CheckMark inherits Rectangle {
+    in property <bool> checked;
+    in property <bool> partial;
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    background: root.checked || root.partial ? Theme.accent : transparent;
+    border-width: root.checked || root.partial ? 0px : 1.5px;
+    border-color: Theme.faint;
+    if root.checked: Icon {
+        x: 2px;
+        y: 2px;
+        width: 12px;
+        height: 12px;
+        commands: Icons.check;
+        tint: Theme.accent-ink;
+        stroke-width: 2px;
+    }
+    if !root.checked && root.partial: Rectangle {
+        x: 4px;
+        y: 7px;
+        width: 8px;
+        height: 2px;
+        background: Theme.accent-ink;
+    }
+}
+
+// A whole-row checkbox: dot, label, detail on the right.
+component CheckRow inherits Rectangle {
+    in property <string> text;
+    in property <string> detail;
+    in property <bool> checked;
+    in property <bool> partial;
+    in property <color> dot: transparent;
+    in property <length> indent: 0px;
+    callback toggled(bool);
+    height: 30px;
+    border-radius: 6px;
+    background: touch.has-hover ? Theme.surface-hover : transparent;
+    touch := TouchArea { clicked => { root.toggled(!root.checked); } }
+    HorizontalLayout {
+        padding-left: 8px + root.indent;
+        padding-right: 8px;
+        spacing: 9px;
+        CheckMark {
+            y: (parent.height - self.height) / 2;
+            checked: root.checked;
+            partial: root.partial;
+        }
+        if root.dot != transparent: Rectangle {
+            width: 8px;
+            height: 8px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 4px;
+            background: root.dot;
+        }
+        Text {
+            text: root.text;
+            color: Theme.text;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        Text {
+            text: root.detail;
+            color: Theme.faint;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component SearchField inherits Rectangle {
+    in property <string> placeholder;
+    in-out property <string> text;
+    callback edited(string);
+    height: 36px;
+    border-radius: 8px;
+    background: Theme.input;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.accent : Theme.border;
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 6px;
+        spacing: 8px;
+        Icon {
+            y: (parent.height - self.height) / 2;
+            width: 16px;
+            height: 16px;
+            commands: Icons.search;
+            tint: Theme.faint;
+        }
+        Rectangle {
+            horizontal-stretch: 1;
+            clip: true;
+            if root.text == "": Text {
+                x: 0;
+                width: parent.width;
+                height: parent.height;
+                text: root.placeholder;
+                color: Theme.faint;
+                vertical-alignment: center;
+                horizontal-alignment: left;
+            }
+            input := TextInput {
+                x: 0;
+                width: parent.width;
+                height: parent.height;
+                text <=> root.text;
+                color: Theme.text;
+                single-line: true;
+                vertical-alignment: center;
+                horizontal-alignment: left;
+                edited => { root.edited(self.text); }
+            }
+        }
+        if root.text != "": IconButton {
+            y: (parent.height - self.height) / 2;
+            width: 24px;
+            height: 24px;
+            icon-size: 14px;
+            icon: Icons.x;
+            clicked => {
+                root.text = "";
+                root.edited("");
+            }
+        }
+    }
+}
+
+// A dropdown drawn by us, inside the window.
+component Dropdown inherits Rectangle {
+    in property <[string]> model;
+    in property <string> icon;
+    in-out property <int> current-index;
+    in property <length> popup-height: min(root.model.length * 32px + 10px, 340px);
+    callback selected(int);
+    height: 34px;
+    border-radius: 8px;
+    background: touch.has-hover ? Theme.surface-hover : Theme.input;
+    border-width: 1px;
+    border-color: Theme.border;
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 8px;
+        spacing: 8px;
+        if root.icon != "": Icon {
+            y: (parent.height - self.height) / 2;
+            width: 16px;
+            height: 16px;
+            commands: root.icon;
+            tint: Theme.muted;
+        }
+        Text {
+            text: root.current-index >= 0 && root.current-index < root.model.length ? root.model[root.current-index] : "";
+            color: Theme.text;
+            overflow: elide;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        Icon {
+            y: (parent.height - self.height) / 2;
+            width: 16px;
+            height: 16px;
+            commands: Icons.chevron-down;
+            tint: Theme.muted;
+        }
+    }
+    touch := TouchArea { clicked => { popup.show(); } }
+    popup := PopupWindow {
+        x: 0;
+        y: root.height + 4px;
+        width: root.width;
+        height: root.popup-height;
+        Rectangle {
+            background: Theme.surface;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: Theme.border;
+            drop-shadow-blur: 18px;
+            drop-shadow-color: #00000090;
+            ListView {
+                x: 5px;
+                y: 5px;
+                width: parent.width - 10px;
+                height: parent.height - 10px;
+                for item[i] in root.model: Rectangle {
+                    height: 32px;
+                    border-radius: 6px;
+                    background: item-touch.has-hover ? Theme.surface-hover : (i == root.current-index ? Theme.accent-soft : transparent);
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        Text {
+                            text: item;
+                            color: i == root.current-index ? Theme.accent : Theme.text;
+                            overflow: elide;
+                            vertical-alignment: center;
+                        }
+                    }
+                    item-touch := TouchArea {
+                        clicked => {
+                            root.current-index = i;
+                            root.selected(i);
+                            popup.close();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// zodiak's switch: 34 x 20, a 14 px knob 3 px in, #444551 off and lavender on.
+component Toggle inherits Rectangle {
+    in property <string> text;
+    in-out property <bool> checked;
+    callback toggled(bool);
+    height: 28px;
+    horizontal-stretch: 0;
+    HorizontalLayout {
+        spacing: 10px;
+        alignment: start;
+        Rectangle {
+            width: 34px;
+            height: 20px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 10px;
+            background: root.checked ? Theme.accent : #444551;
+            animate background { duration: 150ms; }
+            Rectangle {
+                x: root.checked ? 17px : 3px;
+                y: 3px;
+                width: 14px;
+                height: 14px;
+                border-radius: 7px;
+                background: root.checked ? #241f37 : #dddce6;
+                animate x { duration: 150ms; easing: ease-out; }
+            }
+        }
+        if root.text != "": Text {
+            text: root.text;
+            color: Theme.text;
+            vertical-alignment: center;
+        }
+    }
+    TouchArea {
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
+    }
+}
+
+// A keyboard shortcut, as zodiak shows one.
+component Kbd inherits Rectangle {
+    in property <string> text;
+    height: 18px;
+    width: key.preferred-width + 10px;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: #363742;
+    key := Text {
+        x: 5px;
+        text: root.text;
+        color: #858797;
+        font-size: 11px;
+        vertical-alignment: center;
+    }
+}
+
+// Label left, switch right (zodiak's "check" row).
+component SwitchRow inherits Rectangle {
+    in property <string> text;
+    in property <string> shortcut;
+    in-out property <bool> checked;
+    callback toggled(bool);
+    height: 32px;
+    HorizontalLayout {
+        spacing: 10px;
+        Text {
+            text: root.text;
+            color: #d0cfdd;
+            font-size: 13px;
+            vertical-alignment: center;
+        }
+        if root.shortcut != "": Kbd {
+            y: (parent.height - self.height) / 2;
+            text: root.shortcut;
+        }
+        Rectangle { horizontal-stretch: 1; }
+        Toggle {
+            y: (parent.height - self.height) / 2;
+            checked <=> root.checked;
+            toggled(on) => { root.toggled(on); }
+        }
+    }
+}
+
+// A field's caption (zodiak's "field" label).
+component FieldLabel inherits Text {
+    color: #a9abba;
+    font-size: 12px;
+}
+
+component SettingsTab inherits Rectangle {
+    in property <string> icon;
+    in property <string> text;
+    in property <bool> active;
+    callback clicked;
+    height: 40px;
+    border-radius: 7px;
+    background: root.active ? #2c293d : touch.has-hover ? Theme.surface-hover : transparent;
+    HorizontalLayout {
+        padding-left: 10px;
+        spacing: 10px;
+        Icon {
+            y: (parent.height - self.height) / 2;
+            width: 17px;
+            height: 17px;
+            commands: root.icon;
+            tint: root.active ? #eeebff : touch.has-hover ? #ededf5 : #a9abba;
+        }
+        Text {
+            text: root.text;
+            color: root.active ? #eeebff : touch.has-hover ? #ededf5 : #a9abba;
+            font-size: 13px;
+            vertical-alignment: center;
+        }
+    }
+    touch := TouchArea { clicked => { root.clicked(); } }
+}
+
+component SliderBar inherits Rectangle {
+    in property <float> minimum: 0;
+    in property <float> maximum: 1;
+    in-out property <float> value;
+    callback changed(float);
+    property <float> ratio: max(0, min(1, (root.value - root.minimum) / (root.maximum - root.minimum)));
+    height: 24px;
+    min-width: 100px;
+    function set-from(x: length) {
+        root.value = root.minimum + (root.maximum - root.minimum) * max(0, min(1, (x - 7px) / max(1px, root.width - 14px)));
+        root.changed(root.value);
+    }
+    Rectangle {
+        x: 7px;
+        y: (parent.height - self.height) / 2;
+        width: parent.width - 14px;
+        height: 4px;
+        border-radius: 2px;
+        background: Theme.surface-hover;
+    }
+    Rectangle {
+        x: 7px;
+        y: (parent.height - self.height) / 2;
+        width: (parent.width - 14px) * root.ratio;
+        height: 4px;
+        border-radius: 2px;
+        background: Theme.accent;
+    }
+    Rectangle {
+        x: (parent.width - 14px) * root.ratio;
+        y: (parent.height - self.height) / 2;
+        width: 14px;
+        height: 14px;
+        border-radius: 7px;
+        background: #eeeeee;
+        drop-shadow-blur: 2px;
+        drop-shadow-color: #111111;
+    }
+    drag := TouchArea {
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down) {
+                root.set-from(self.mouse-x);
+            }
+        }
+        moved => {
+            if (self.pressed) {
+                root.set-from(self.mouse-x);
+            }
+        }
+    }
+}
+
+component WindowButton inherits Rectangle {
+    in property <string> icon;
+    in property <bool> danger;
+    callback clicked;
+    width: 46px;
+    height: 32px;
+    background: touch.has-hover ? (root.danger ? #c42b3c : Theme.surface-hover) : transparent;
+    Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 15px;
+        height: 15px;
+        commands: root.icon;
+        tint: touch.has-hover ? #ffffff : Theme.muted;
+        stroke-width: 1.2px;
+    }
+    touch := TouchArea { clicked => { root.clicked(); } }
+}
+
+// A rail entry: icon, lavender when it is the open page, a tooltip on hover.
+component RailButton inherits Rectangle {
+    in property <string> icon;
+    in property <string> tooltip;
+    in property <bool> active;
+    callback clicked;
+    width: 44px;
+    height: 44px;
+    border-radius: 12px;
+    background: root.active ? Theme.accent-soft : touch.has-hover ? Theme.surface-hover : transparent;
+    if root.active: Rectangle {
+        x: -8px;
+        y: 12px;
+        width: 3px;
+        height: 20px;
+        border-radius: 2px;
+        background: Theme.accent;
+    }
+    Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 20px;
+        height: 20px;
+        commands: root.icon;
+        tint: root.active ? Theme.accent : touch.has-hover ? Theme.text : Theme.muted;
+    }
+    touch := TouchArea { clicked => { root.clicked(); } }
+    if touch.has-hover && root.tooltip != "": Rectangle {
+        x: parent.width + 10px;
+        y: (parent.height - self.height) / 2;
+        width: tip.preferred-width + 16px;
+        height: 26px;
+        border-radius: 6px;
+        background: Theme.surface-raised;
+        border-width: 1px;
+        border-color: Theme.control-border;
+        tip := Text {
+            x: 8px;
+            text: root.tooltip;
+            color: Theme.text;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// ---------------------------------------------------------------- map
+
+component MapView inherits Rectangle {
+    in property <[MapTile]> tiles;
+    in property <[MapMarker]> markers;
+    in property <bool> me-visible;
+    in property <length> me-x;
+    in property <length> me-y;
+    in property <float> me-heading;
+    in property <color> me-color;
+    in property <string> me-label;
+    in property <bool> interactive: true;
+    in property <bool> wheel-zoom: interactive;
+    out property <length> view-width: self.width;
+    out property <length> view-height: self.height;
+    callback pan-by(length, length);
+    callback zoom-by(float, length, length);
+    background: #0b0c0f;
+    clip: true;
+
+    for t in tiles: Image {
+        x: t.x;
+        y: t.y;
+        width: t.size;
+        height: t.size;
+        source: t.image;
+        image-fit: fill;
+    }
+
+    for m in markers: Rectangle {
+        x: m.x - m.size / 2;
+        y: m.y - m.size / 2;
+        width: m.size;
+        height: m.size;
+        border-radius: m.size / 2;
+        background: m.color;
+        border-width: m.live ? 2px : 1px;
+        border-color: m.live ? #ffffff : #00000099;
+        if m.level != 0: Path {
+            x: m.size - 3px;
+            y: -6px;
+            width: 9px;
+            height: 8px;
+            viewbox-width: 9;
+            viewbox-height: 8;
+            commands: m.level > 0 ? "M 4.5 0 L 9 8 L 0 8 Z" : "M 0 0 L 9 0 L 4.5 8 Z";
+            fill: #ffffff;
+            stroke: #000000;
+            stroke-width: 1px;
+        }
+    }
+
+    if me-visible: Rectangle {
+        x: me-x - 14px;
+        y: me-y - 14px;
+        width: 28px;
+        height: 28px;
+        Path {
+            width: 28px;
+            height: 28px;
+            viewbox-width: 28;
+            viewbox-height: 28;
+            commands: "M 14 2 L 23 24 L 14 18 L 5 24 Z";
+            fill: me-color;
+            stroke: #000000;
+            stroke-width: 1.5px;
+            transform-rotation: me-heading * 1deg;
+            transform-origin: { x: 14px, y: 14px };
+        }
+        if me-label != "": Text {
+            y: 28px;
+            x: -20px;
+            width: 68px;
+            horizontal-alignment: center;
+            text: me-label;
+            color: me-color;
+            font-size: 11px;
+            font-weight: 700;
+        }
+    }
+
+    if interactive || wheel-zoom: TouchArea {
+        property <length> last-x;
+        property <length> last-y;
+        mouse-cursor: !root.interactive ? MouseCursor.default : self.pressed ? MouseCursor.grabbing : MouseCursor.grab;
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down) {
+                self.last-x = self.mouse-x;
+                self.last-y = self.mouse-y;
+            }
+        }
+        moved => {
+            if (self.pressed && root.interactive) {
+                root.pan-by(self.mouse-x - self.last-x, self.mouse-y - self.last-y);
+                self.last-x = self.mouse-x;
+                self.last-y = self.mouse-y;
+            }
+        }
+        scroll-event(e) => {
+            root.zoom-by(e.delta-y / 1px, self.mouse-x, self.mouse-y);
+            accept
+        }
+    }
+}
+
+// ---------------------------------------------------------------- meter rows
+
+component RowBar inherits Rectangle {
+    in property <MeterRow> data;
+    in property <int> rank;
+    in property <bool> compact;
+    in property <bool> selected;
+    callback clicked;
+    height: compact ? 24px : 40px;
+    border-radius: compact ? 5px : 8px;
+    background: selected ? Theme.accent-soft : touch.has-hover && !compact ? Theme.surface-hover : (compact ? #ffffff08 : Theme.surface);
+    clip: true;
+    Rectangle {
+        x: 0;
+        width: parent.width * data.share;
+        background: data.color.with-alpha(data.local ? 0.28 : 0.16);
+    }
+    Rectangle {
+        x: 0;
+        width: 3px;
+        background: data.color;
+    }
+    touch := TouchArea { clicked => { root.clicked(); } }
+    HorizontalLayout {
+        padding-left: compact ? 8px : 12px;
+        padding-right: compact ? 8px : 12px;
+        spacing: 10px;
+        if !compact: Text {
+            text: root.rank;
+            color: Theme.faint;
+            font-size: 12px;
+            width: 16px;
+            vertical-alignment: center;
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            Text {
+                text: data.name + (data.estimated ? " ~" : "");
+                color: data.local ? Theme.accent : Theme.text;
+                font-weight: data.local ? 700 : 500;
+                overflow: elide;
+            }
+            if !compact && data.class-name != "": Text {
+                text: data.class-name;
+                color: Theme.faint;
+                font-size: 11px;
+            }
+        }
+        if !compact: Text {
+            text: data.gear-score;
+            color: Theme.muted;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+            width: 48px;
+        }
+        if !compact: Text {
+            text: data.power;
+            color: Theme.muted;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+            width: 64px;
+        }
+        Text {
+            text: data.damage;
+            color: Theme.muted;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+            width: compact ? 52px : 80px;
+        }
+        Text {
+            text: data.dps;
+            color: Theme.text;
+            font-weight: 700;
+            font-size: compact ? 13px : 14px;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+            width: compact ? 52px : 80px;
+        }
+        Text {
+            text: data.share-text;
+            color: Theme.muted;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+            width: 40px;
+        }
+        if !compact: Text {
+            text: data.crit;
+            color: Theme.muted;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+            width: 44px;
+        }
+        if !compact: Text {
+            text: data.heal;
+            color: Theme.green;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+            width: 64px;
+        }
+    }
+}
+
+// ---------------------------------------------------------------- overlays
+
+component OverlayRowBar inherits Rectangle {
+    in property <OverlayRow> data;
+    height: 24px;
+    border-radius: 5px;
+    background: #ffffff08;
+    clip: true;
+    Rectangle {
+        x: 0;
+        width: parent.width * root.data.share;
+        background: root.data.color.with-alpha(root.data.local ? 0.30 : 0.18);
+    }
+    Rectangle {
+        x: 0;
+        width: 3px;
+        background: root.data.color;
+    }
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 8px;
+        Text {
+            text: root.data.name;
+            color: root.data.local ? Theme.accent : Theme.text;
+            font-weight: root.data.local ? 700 : 500;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        Text { text: root.data.gear-score; color: Theme.faint; font-size: 11px; vertical-alignment: center; horizontal-alignment: right; width: 34px; }
+        Text { text: root.data.power; color: Theme.faint; font-size: 11px; vertical-alignment: center; horizontal-alignment: right; width: 46px; }
+        Text { text: root.data.value; color: Theme.muted; vertical-alignment: center; horizontal-alignment: right; width: 48px; }
+        Text { text: root.data.rate; color: Theme.text; font-weight: 700; vertical-alignment: center; horizontal-alignment: right; width: 48px; }
+        Text { text: root.data.share-text; color: Theme.muted; vertical-alignment: center; horizontal-alignment: right; width: 34px; }
+    }
+}
+
+export component MeterOverlay inherits Window {
+    in property <[OverlayRow]> rows;
+    in property <string> header;
+    in property <string> overlay-title: "za2 DPS overlay";
+    in property <bool> locked;
+    in property <float> overlay-opacity: 0.85;
+    callback drag();
+    callback toggle-lock();
+    title: root.overlay-title;
+    icon: @image-url("brand/icon-256.png");
+    no-frame: true;
+    always-on-top: true;
+    background: transparent;
+    preferred-width: 380px;
+    preferred-height: 220px;
+    min-width: 240px;
+    min-height: 80px;
+    default-font-size: 12px;
+
+    Rectangle {
+        background: Theme.background.with-alpha(root.overlay-opacity);
+        border-radius: Theme.radius;
+        if !root.locked: TouchArea {
+            pointer-event(e) => {
+                if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                    root.drag();
+                }
+            }
+        }
+        VerticalLayout {
+            padding: 8px;
+            spacing: 4px;
+            Text {
+                height: 20px;
+                text: root.header;
+                color: Theme.muted;
+                font-size: 11px;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+            for row in root.rows: OverlayRowBar { data: row; }
+            Rectangle { }
+        }
+        if !root.locked: IconButton {
+            x: parent.width - self.width - 4px;
+            y: 4px;
+            width: 26px;
+            height: 26px;
+            icon-size: 15px;
+            boxed: true;
+            icon: Icons.lock-open;
+            clicked => { root.toggle-lock(); }
+        }
+    }
+}
+
+export component MapOverlay inherits Window {
+    in property <[MapTile]> tiles;
+    in property <[MapMarker]> markers;
+    in property <bool> me-visible;
+    in property <length> me-x;
+    in property <length> me-y;
+    in property <float> me-heading;
+    in property <color> me-color;
+    in property <string> me-label;
+    in property <bool> locked;
+    in property <float> overlay-opacity: 0.85;
+    out property <length> view-width: map.view-width;
+    out property <length> view-height: map.view-height;
+    callback drag();
+    callback toggle-lock();
+    callback zoom-by(float);
+    // quick search: resources ("g:" + key) and monsters ("p:" + id) of the map, shown or hidden with a tick
+    in-out property <bool> search-open;
+    in-out property <string> search-query;
+    in property <[FilterRow]> search-rows;
+    callback search(string);
+    callback toggle-item(string, bool);
+    title: "za2 map overlay";
+    icon: @image-url("brand/icon-256.png");
+    no-frame: true;
+    always-on-top: true;
+    background: transparent;
+    preferred-width: 300px;
+    preferred-height: 300px;
+    min-width: 150px;
+    min-height: 150px;
+
+    Rectangle {
+        opacity: root.overlay-opacity;
+        border-radius: 12px;
+        clip: true;
+        map := MapView {
+            tiles: root.tiles;
+            markers: root.markers;
+            me-visible: root.me-visible;
+            me-x: root.me-x;
+            me-y: root.me-y;
+            me-heading: root.me-heading;
+            me-color: root.me-color;
+            me-label: root.me-label;
+            interactive: false;
+            wheel-zoom: false;
+        }
+        if !root.locked: TouchArea {
+            pointer-event(e) => {
+                if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                    root.drag();
+                }
+            }
+            scroll-event(e) => {
+                root.zoom-by(e.delta-y / 1px);
+                accept
+            }
+        }
+    }
+    if !root.locked: HorizontalLayout {
+        x: parent.width - self.preferred-width - 6px;
+        y: 6px;
+        spacing: 4px;
+        IconButton { width: 26px; height: 26px; icon-size: 15px; boxed: true; icon: Icons.minus; clicked => { root.zoom-by(-120); } }
+        IconButton { width: 26px; height: 26px; icon-size: 15px; boxed: true; icon: Icons.plus; clicked => { root.zoom-by(120); } }
+        IconButton { width: 26px; height: 26px; icon-size: 15px; boxed: true; icon: Icons.lock-open; clicked => { root.toggle-lock(); } }
+    }
+    if !root.locked && root.search-open: Rectangle {
+        x: 6px;
+        y: 38px;
+        width: parent.width - 12px;
+        height: parent.height - 38px - 40px;
+        background: Theme.surface.with-alpha(0.97);
+        border-radius: 10px;
+        border-width: 1px;
+        border-color: Theme.border;
+        TouchArea { }
+        VerticalLayout {
+            padding: 6px;
+            spacing: 6px;
+            SearchField {
+                placeholder: "Resources and monsters";
+                text <=> root.search-query;
+                edited(t) => { root.search(t); }
+            }
+            ListView {
+                vertical-stretch: 1;
+                for r in root.search-rows: CheckRow {
+                    text: r.label;
+                    detail: r.detail;
+                    checked: r.checked;
+                    dot: r.color;
+                    toggled(on) => { root.toggle-item(r.key, on); }
+                }
+            }
+        }
+    }
+    if !root.locked: IconButton {
+        x: parent.width - self.width - 6px;
+        y: parent.height - self.height - 6px;
+        width: 26px;
+        height: 26px;
+        icon-size: 15px;
+        boxed: true;
+        active: root.search-open;
+        icon: Icons.search;
+        clicked => {
+            root.search-open = !root.search-open;
+            if (root.search-open) { root.search(root.search-query); }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- main window
+
+export component App inherits Window {
+    title: "za2 - zodiak for Aion 2";
+    icon: @image-url("brand/icon-256.png");
+    no-frame: true;
+    background: transparent;
+    preferred-width: 1080px;
+    preferred-height: 720px;
+    min-width: 680px;
+    min-height: 480px;
+    default-font-size: 13px;
+
+    in-out property <int> tab: 0;
+
+    in property <string> capture-state;
+    in property <color> capture-color: Theme.muted;
+    in property <string> zone-name;
+    in property <string> encounter-time;
+    in property <string> encounter-total;
+    in property <string> encounter-info;
+    in property <[MeterRow]> rows;
+    in property <[SkillRow]> skills;
+    in property <string> skills-title;
+    in-out property <int> selected-row: -1;
+    in-out property <int> scope: 0;
+    in property <[string]> session-names: ["Current"];
+    in-out property <int> session-index: 0;
+    callback session-selected(int);
+    callback reset();
+    callback select-row(int);
+    callback scope-changed(int);
+    // the table shows the current fight (0) or the total (1)
+    in-out property <int> meter-range: 0;
+    callback meter-range-changed(int);
+    in property <[OverlayConfigRow]> overlay-configs;
+    callback overlay-add();
+    callback overlay-remove(int);
+    callback overlay-changed(OverlayConfigRow);
+
+    in property <[MapTile]> tiles;
+    in property <[MapMarker]> markers;
+    in property <bool> me-visible;
+    in property <length> me-x;
+    in property <length> me-y;
+    in property <float> me-heading;
+    in property <color> me-color;
+    in property <string> me-label;
+    in property <string> position-text;
+    in property <color> position-color;
+    in property <[string]> map-names;
+    in-out property <int> map-index;
+    in-out property <bool> follow: true;
+    in property <string> map-hint;
+    in-out property <length> map-width;
+    in-out property <length> map-height;
+    callback pan-by(length, length);
+    callback zoom-by(float, length, length);
+    callback map-selected(int);
+    callback follow-changed(bool);
+    callback center-on-player();
+
+    in property <[FilterRow]> resource-rows;
+    in property <[FilterRow]> monster-rows;
+    in property <string> resource-summary;
+    in property <string> monster-summary;
+    in-out property <int> filter-tab: 0;
+    in-out property <string> resource-query;
+    in-out property <string> monster-query;
+    in-out property <bool> show-live-mobs;
+    in-out property <bool> show-cubes;
+    in-out property <bool> cube-sound;
+    in-out property <float> cube-volume: 70;
+    callback cube-sound-changed(bool);
+    callback cube-volume-changed(float);
+    // true starts a repeating test of the cube sound, false stops it
+    callback test-cube-sound(bool);
+    in-out property <bool> sound-panel-open;
+    in-out property <bool> sound-testing;
+    property <Point> sound-anchor;
+    function close-sound-panel() {
+        root.sound-panel-open = false;
+        if (root.sound-testing) {
+            root.sound-testing = false;
+            root.test-cube-sound(false);
+        }
+    }
+    callback live-mobs-changed(bool);
+    callback cubes-changed(bool);
+    callback toggle-gather(string, bool);
+    callback toggle-kind(string, bool);
+    callback expand-kind(string);
+    callback toggle-pet(string, bool);
+    callback resource-search(string);
+    callback monster-search(string);
+    callback select-shown-monsters();
+    callback clear-monsters();
+    callback clear-resources();
+
+    in-out property <bool> settings-open;
+    in-out property <int> settings-tab: 0;
+    in-out property <string> own-name;
+    in-out property <bool> reset-on-zone;
+    in-out property <bool> meter-overlay;
+    in-out property <bool> map-overlay;
+    in-out property <bool> overlays-locked;
+    in-out property <float> overlay-opacity: 0.85;
+    in-out property <float> overlay-radius: 150;
+    callback own-name-edited(string);
+    callback reset-on-zone-changed(bool);
+    callback meter-overlay-changed(bool);
+    callback map-overlay-changed(bool);
+    callback lock-changed(bool);
+    callback opacity-changed(float);
+    callback overlay-radius-changed(float);
+    // zooms the map overlay; used by  --send map-zoom-in / map-zoom-out
+    callback map-overlay-zoom(float);
+    callback start-recording();
+    callback stop-recording();
+    in property <bool> recording;
+    in property <string> recording-text;
+
+    // the window has no system frame: the title bar moves it, its buttons control it, the edges resize it
+    in property <bool> is-maximized;
+    callback window-drag();
+    callback window-minimize();
+    callback window-maximize();
+    callback window-close();
+    // 0 north, 1 south, 2 east, 3 west, 4 north-east, 5 north-west, 6 south-east, 7 south-west
+    callback window-resize(int);
+
+    forward-focus: keys;
+
+    Rectangle {
+        background: Theme.background;
+        border-radius: root.is-maximized ? 0px : 10px;
+        border-width: root.is-maximized ? 0px : 1px;
+        border-color: Theme.border;
+        clip: true;
+
+        keys := FocusScope {
+            key-pressed(e) => {
+                if (e.modifiers.control && e.text == "r") { root.reset(); return accept; }
+                if (e.modifiers.control && e.text == "o") { root.meter-overlay = !root.meter-overlay; root.meter-overlay-changed(root.meter-overlay); return accept; }
+                if (e.modifiers.control && e.text == "m") { root.map-overlay = !root.map-overlay; root.map-overlay-changed(root.map-overlay); return accept; }
+                if (e.modifiers.control && e.text == "l") { root.overlays-locked = !root.overlays-locked; root.lock-changed(root.overlays-locked); return accept; }
+                if (e.text == "1") { root.tab = 0; return accept; }
+                if (e.text == "2") { root.tab = 1; return accept; }
+                if (e.text == "3") { root.settings-open = true; return accept; }
+                if (e.text == Key.Escape && root.settings-open) { root.settings-open = false; return accept; }
+                reject
+            }
+
+            VerticalLayout {
+                // ------------------------------------------------ title bar: logo in the middle, window buttons right
+                Rectangle {
+                    height: 32px;
+                    background: Theme.chrome;
+                    // moving starts only once the pressed mouse moves, so a double click stays with us and maximizes
+                    TouchArea {
+                        property <length> press-x;
+                        property <length> press-y;
+                        pointer-event(e) => {
+                            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                                self.press-x = self.mouse-x;
+                                self.press-y = self.mouse-y;
+                            }
+                        }
+                        moved => {
+                            if (self.pressed && (abs(self.mouse-x - self.press-x) > 4px || abs(self.mouse-y - self.press-y) > 4px)) {
+                                root.window-drag();
+                            }
+                        }
+                        double-clicked => { root.window-maximize(); }
+                    }
+                    Path {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        width: 22px;
+                        height: 9.4px;
+                        viewbox-width: 1129.75;
+                        viewbox-height: 481.65;
+                        fill: #f7f5f1;
+                        commands: "M1129.75,240.83c-81.04-81.04-175.16-141.02-275.54-179.94,18.1,29.02,31.94,60.96,40.66,94.96,7.95,30.97-17.05,60.9-49.02,60.9h-.05c-22.16,0-42.15-14.5-47.66-35.96C771.47,76.83,677.15,0,564.87,0s-206.59,76.83-233.27,180.78c-5.51,21.46-25.5,35.96-47.66,35.96h-.05c-31.97,0-56.97-29.93-49.02-60.9,8.72-34,22.56-65.94,40.66-94.96C175.14,99.81,81.04,159.79,0,240.83c81.04,81.04,175.14,141.02,275.54,179.94-18.89-30.29-33.13-63.78-41.75-99.46-7.47-30.91,17.39-60.51,49.18-60.51h0c22.43,0,42.59,14.86,47.85,36.67,25.47,105.67,120.57,184.18,234.05,184.18s208.58-78.52,234.05-184.18c5.26-21.81,25.42-36.67,47.85-36.67h0c31.8,0,56.65,29.6,49.18,60.51-8.62,35.68-22.86,69.17-41.75,99.46,100.38-38.92,194.5-98.9,275.54-179.94Z";
+                    }
+                    HorizontalLayout {
+                        x: parent.width - self.preferred-width;
+                        height: parent.height;
+                        WindowButton { icon: Icons.minus; clicked => { root.window-minimize(); } }
+                        WindowButton { icon: root.is-maximized ? Icons.copy : Icons.square; clicked => { root.window-maximize(); } }
+                        WindowButton { icon: Icons.x; danger: true; clicked => { root.window-close(); } }
+                    }
+                    Rectangle {
+                        y: parent.height - 1px;
+                        height: 1px;
+                        background: #292a33;
+                    }
+                }
+
+                HorizontalLayout {
+                    vertical-stretch: 1;
+                    // ------------------------------------------------ pages
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        VerticalLayout {
+                            x: 68px;
+                            width: parent.width - 68px;
+                            padding: 16px;
+                            spacing: 12px;
+
+                            // meter
+                            if root.tab == 0: HorizontalLayout {
+                                spacing: 12px;
+                                VerticalLayout {
+                                    spacing: 10px;
+                                    horizontal-stretch: 3;
+                                    HorizontalLayout {
+                                        height: 48px;
+                                        spacing: 10px;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            spacing: 2px;
+                                            horizontal-stretch: 1;
+                                            HorizontalLayout {
+                                                spacing: 10px;
+                                                alignment: start;
+                                                Text { text: root.encounter-time; color: Theme.text; font-size: 22px; font-weight: 700; }
+                                                Text { text: root.encounter-total; color: Theme.muted; vertical-alignment: bottom; }
+                                            }
+                                            Text { text: root.encounter-info; color: Theme.faint; font-size: 12px; overflow: elide; }
+                                        }
+                                        SegmentBar {
+                                            y: (parent.height - self.height) / 2;
+                                            HorizontalLayout {
+                                                padding: 3px;
+                                                spacing: 2px;
+                                                Segment { text: "Fight"; active: root.meter-range == 0; clicked => { root.meter-range = 0; root.meter-range-changed(0); } }
+                                                Segment { text: "Total"; active: root.meter-range == 1; clicked => { root.meter-range = 1; root.meter-range-changed(1); } }
+                                            }
+                                        }
+                                        Dropdown {
+                                            y: (parent.height - self.height) / 2;
+                                            icon: Icons.history;
+                                            model: root.session-names;
+                                            current-index <=> root.session-index;
+                                            selected(i) => { root.session-selected(i); }
+                                            width: 240px;
+                                        }
+                                        SegmentBar {
+                                            y: (parent.height - self.height) / 2;
+                                            HorizontalLayout {
+                                                padding: 3px;
+                                                spacing: 2px;
+                                                Segment { text: "All"; active: root.scope == 0; clicked => { root.scope = 0; root.scope-changed(0); } }
+                                                Segment { text: "Group"; active: root.scope == 1; clicked => { root.scope = 1; root.scope-changed(1); } }
+                                                Segment { text: "Me"; active: root.scope == 2; clicked => { root.scope = 2; root.scope-changed(2); } }
+                                            }
+                                        }
+                                        IconButton { y: (parent.height - self.height) / 2; boxed: true; icon: Icons.rotate-ccw; clicked => { root.reset(); } }
+                                    }
+                                    HorizontalLayout {
+                                        padding-left: 12px;
+                                        padding-right: 12px;
+                                        spacing: 10px;
+                                        height: 16px;
+                                        SectionTitle { text: "#"; width: 16px; }
+                                        SectionTitle { text: "PLAYER"; horizontal-stretch: 1; }
+                                        SectionTitle { text: "GS"; width: 48px; horizontal-alignment: right; }
+                                        SectionTitle { text: "POWER"; width: 64px; horizontal-alignment: right; }
+                                        SectionTitle { text: "DAMAGE"; width: 80px; horizontal-alignment: right; }
+                                        SectionTitle { text: "DPS"; width: 80px; horizontal-alignment: right; }
+                                        SectionTitle { text: "SHARE"; width: 40px; horizontal-alignment: right; }
+                                        SectionTitle { text: "CRIT"; width: 44px; horizontal-alignment: right; }
+                                        SectionTitle { text: "HEAL"; width: 64px; horizontal-alignment: right; }
+                                    }
+                                    ListView {
+                                        for row[i] in root.rows: VerticalLayout {
+                                            padding-bottom: 4px;
+                                            RowBar {
+                                                data: row;
+                                                rank: i + 1;
+                                                selected: root.selected-row == row.id;
+                                                clicked => { root.select-row(row.id); }
+                                            }
+                                        }
+                                    }
+                                    if root.rows.length == 0: Muted {
+                                        text: "No damage yet. Damage appears when the game sends combat frames.";
+                                        horizontal-alignment: center;
+                                        height: 40px;
+                                    }
+                                }
+                                Card {
+                                    horizontal-stretch: 2;
+                                    VerticalLayout {
+                                        padding: 12px;
+                                        spacing: 6px;
+                                        Label { text: root.skills-title; font-weight: 600; height: 22px; overflow: elide; }
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            height: 16px;
+                                            SectionTitle { text: "SKILL"; horizontal-stretch: 1; }
+                                            SectionTitle { text: "TOTAL"; width: 64px; horizontal-alignment: right; }
+                                            SectionTitle { text: "HITS"; width: 36px; horizontal-alignment: right; }
+                                            SectionTitle { text: "CRIT"; width: 40px; horizontal-alignment: right; }
+                                        }
+                                        ListView {
+                                            for s in root.skills: VerticalLayout {
+                                                padding-bottom: 3px;
+                                                Rectangle {
+                                                    height: 26px;
+                                                    border-radius: 6px;
+                                                    clip: true;
+                                                    background: Theme.surface-raised;
+                                                    Rectangle {
+                                                        x: 0;
+                                                        width: parent.width * s.share;
+                                                        background: Theme.accent.with-alpha(0.16);
+                                                    }
+                                                    HorizontalLayout {
+                                                        padding-left: 8px;
+                                                        padding-right: 8px;
+                                                        spacing: 8px;
+                                                        Text { text: s.name; color: Theme.text; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
+                                                        Text { text: s.total; color: Theme.text; font-weight: 600; width: 64px; horizontal-alignment: right; vertical-alignment: center; }
+                                                        Text { text: s.hits; color: Theme.muted; width: 36px; horizontal-alignment: right; vertical-alignment: center; }
+                                                        Text { text: s.crit; color: Theme.muted; width: 40px; horizontal-alignment: right; vertical-alignment: center; }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // map
+                            if root.tab == 1: HorizontalLayout {
+                                spacing: 12px;
+                                VerticalLayout {
+                                    spacing: 10px;
+                                    horizontal-stretch: 1;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        height: 36px;
+                                        Dropdown {
+                                            y: (parent.height - self.height) / 2;
+                                            icon: Icons.map;
+                                            model: root.map-names;
+                                            current-index <=> root.map-index;
+                                            selected(i) => { root.map-selected(i); }
+                                            width: 180px;
+                                        }
+                                        Rectangle { horizontal-stretch: 1; }
+                                        Rectangle {
+                                            y: (parent.height - self.height) / 2;
+                                            height: 28px;
+                                            width: position.preferred-width + 34px;
+                                            border-radius: 14px;
+                                            background: Theme.surface;
+                                            border-width: 1px;
+                                            border-color: Theme.border;
+                                            Rectangle {
+                                                x: 11px;
+                                                y: (parent.height - self.height) / 2;
+                                                width: 8px;
+                                                height: 8px;
+                                                border-radius: 4px;
+                                                background: root.position-color;
+                                            }
+                                            position := Text {
+                                                x: 26px;
+                                                text: root.position-text;
+                                                color: Theme.muted;
+                                                font-size: 12px;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                        IconButton {
+                                            y: (parent.height - self.height) / 2;
+                                            boxed: true;
+                                            active: root.follow;
+                                            icon: Icons.locate-fixed;
+                                            clicked => {
+                                                root.follow = !root.follow;
+                                                root.follow-changed(root.follow);
+                                                if (root.follow) { root.center-on-player(); }
+                                            }
+                                        }
+                                    }
+                                    Rectangle {
+                                        vertical-stretch: 1;
+                                        border-radius: Theme.radius;
+                                        border-width: 1px;
+                                        border-color: Theme.border;
+                                        clip: true;
+                                        MapView {
+                                            init => { root.map-width = self.width; root.map-height = self.height; }
+                                            changed width => { root.map-width = self.width; }
+                                            changed height => { root.map-height = self.height; }
+                                            tiles: root.tiles;
+                                            markers: root.markers;
+                                            me-visible: root.me-visible;
+                                            me-x: root.me-x;
+                                            me-y: root.me-y;
+                                            me-heading: root.me-heading;
+                                            me-color: root.me-color;
+                                            me-label: root.me-label;
+                                            pan-by(dx, dy) => { root.pan-by(dx, dy); }
+                                            zoom-by(d, x, y) => { root.zoom-by(d, x, y); }
+                                        }
+                                        VerticalLayout {
+                                            x: parent.width - self.preferred-width - 10px;
+                                            y: parent.height - self.preferred-height - 10px;
+                                            spacing: 6px;
+                                            IconButton { boxed: true; icon: Icons.plus; clicked => { root.zoom-by(240, root.map-width / 2, root.map-height / 2); } }
+                                            IconButton { boxed: true; icon: Icons.minus; clicked => { root.zoom-by(-240, root.map-width / 2, root.map-height / 2); } }
+                                        }
+                                        Rectangle {
+                                            x: 10px;
+                                            y: parent.height - self.height - 10px;
+                                            width: min(hint.preferred-width + 20px, parent.width - 70px);
+                                            height: 24px;
+                                            border-radius: 12px;
+                                            background: #101114cc;
+                                            hint := Text {
+                                                x: 10px;
+                                                width: parent.width - 20px;
+                                                text: root.map-hint;
+                                                color: Theme.muted;
+                                                font-size: 11px;
+                                                vertical-alignment: center;
+                                                overflow: elide;
+                                            }
+                                        }
+                                    }
+                                }
+                                Card {
+                                    width: 300px;
+                                    VerticalLayout {
+                                        padding: 10px;
+                                        spacing: 8px;
+                                        VerticalLayout {
+                                            CheckRow { text: "Live monsters"; checked: root.show-live-mobs; dot: #e05050; toggled(on) => { root.show-live-mobs = on; root.live-mobs-changed(on); } }
+                                            CheckRow { text: "Hidden Cubes"; checked: root.show-cubes; dot: #ffd84d; toggled(on) => { root.show-cubes = on; root.cubes-changed(on); } }
+                                            HorizontalLayout {
+                                                spacing: 2px;
+                                                CheckRow { horizontal-stretch: 1; text: "Sound near a Hidden Cube"; checked: root.cube-sound; toggled(on) => { root.cube-sound = on; root.cube-sound-changed(on); } }
+                                                IconButton {
+                                                    width: 30px;
+                                                    height: 30px;
+                                                    icon-size: 16px;
+                                                    icon: Icons.settings;
+                                                    active: root.sound-panel-open;
+                                                    clicked => {
+                                                        if (root.sound-panel-open) {
+                                                            root.close-sound-panel();
+                                                        } else {
+                                                            root.sound-anchor = self.absolute-position;
+                                                            root.sound-panel-open = true;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Rectangle { height: 1px; background: Theme.border; }
+                                        SegmentBar {
+                                            HorizontalLayout {
+                                                padding: 3px;
+                                                spacing: 2px;
+                                                Segment { horizontal-stretch: 1; icon: Icons.pickaxe; active: root.filter-tab == 0; clicked => { root.filter-tab = 0; } }
+                                                Segment { horizontal-stretch: 1; icon: Icons.paw-print; active: root.filter-tab == 1; clicked => { root.filter-tab = 1; } }
+                                            }
+                                        }
+                                        if root.filter-tab == 0: SearchField {
+                                            placeholder: "Search resources";
+                                            text <=> root.resource-query;
+                                            edited(t) => { root.resource-search(t); }
+                                        }
+                                        if root.filter-tab == 1: SearchField {
+                                            placeholder: "Search monsters";
+                                            text <=> root.monster-query;
+                                            edited(t) => { root.monster-search(t); }
+                                        }
+                                        HorizontalLayout {
+                                            height: 22px;
+                                            spacing: 10px;
+                                            padding-left: 4px;
+                                            Muted {
+                                                text: root.filter-tab == 0 ? root.resource-summary : root.monster-summary;
+                                                font-size: 11px;
+                                                horizontal-stretch: 1;
+                                                overflow: elide;
+                                            }
+                                            if root.filter-tab == 1: Text {
+                                                text: "Select shown";
+                                                color: select-all.has-hover ? Theme.accent-hover : Theme.accent;
+                                                font-size: 11px;
+                                                vertical-alignment: center;
+                                                select-all := TouchArea { clicked => { root.select-shown-monsters(); } }
+                                            }
+                                            Text {
+                                                text: "Clear";
+                                                color: clear-all.has-hover ? Theme.accent-hover : Theme.accent;
+                                                font-size: 11px;
+                                                vertical-alignment: center;
+                                                clear-all := TouchArea { clicked => { if (root.filter-tab == 0) { root.clear-resources(); } else { root.clear-monsters(); } } }
+                                            }
+                                        }
+                                        if root.filter-tab == 0: ListView {
+                                            vertical-stretch: 1;
+                                            for r in root.resource-rows: Rectangle {
+                                                height: 30px;
+                                                if r.header: Rectangle {
+                                                    border-radius: 6px;
+                                                    HorizontalLayout {
+                                                        padding-left: 2px;
+                                                        Rectangle {
+                                                            width: 22px;
+                                                            border-radius: 6px;
+                                                            background: header-touch.has-hover ? Theme.surface-hover : transparent;
+                                                            Icon {
+                                                                x: 3px;
+                                                                y: (parent.height - self.height) / 2;
+                                                                width: 16px;
+                                                                height: 16px;
+                                                                commands: r.expanded ? Icons.chevron-down : Icons.chevron-right;
+                                                                tint: Theme.muted;
+                                                            }
+                                                            header-touch := TouchArea { clicked => { root.expand-kind(r.key); } }
+                                                        }
+                                                        CheckRow {
+                                                            horizontal-stretch: 1;
+                                                            text: r.label;
+                                                            detail: r.detail;
+                                                            checked: r.checked;
+                                                            partial: r.partial;
+                                                            dot: r.color;
+                                                            toggled(on) => { root.toggle-kind(r.key, on); }
+                                                        }
+                                                    }
+                                                }
+                                                if !r.header: CheckRow {
+                                                    indent: 24px;
+                                                    text: r.label;
+                                                    detail: r.detail;
+                                                    checked: r.checked;
+                                                    toggled(on) => { root.toggle-gather(r.key, on); }
+                                                }
+                                            }
+                                        }
+                                        if root.filter-tab == 1: ListView {
+                                            vertical-stretch: 1;
+                                            for r in root.monster-rows: CheckRow {
+                                                text: r.label;
+                                                detail: r.detail;
+                                                checked: r.checked;
+                                                dot: r.checked ? r.color : transparent;
+                                                toggled(on) => { root.toggle-pet(r.key, on); }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                        }
+
+                        // ------------------------------------------------ rail, drawn over the pages so its tooltips stay visible
+                        Rectangle {
+                            x: 0;
+                            width: 68px;
+                            background: Theme.chrome;
+                            Rectangle {
+                                x: parent.width - 1px;
+                                width: 1px;
+                                background: Theme.chrome-line;
+                            }
+                            VerticalLayout {
+                                padding-top: 16px;
+                                padding-bottom: 14px;
+                                spacing: 10px;
+                                alignment: start;
+                                HorizontalLayout { alignment: center; RailButton { icon: Icons.swords; tooltip: "Meter"; active: root.tab == 0; clicked => { root.tab = 0; } } }
+                                HorizontalLayout { alignment: center; RailButton { icon: Icons.map; tooltip: "Map"; active: root.tab == 1; clicked => { root.tab = 1; } } }
+                            }
+                            VerticalLayout {
+                                y: parent.height - self.preferred-height;
+                                padding-bottom: 14px;
+                                spacing: 10px;
+                                HorizontalLayout {
+                                    alignment: center;
+                                    status := Rectangle {
+                                        width: 44px;
+                                        height: 28px;
+                                        Rectangle {
+                                            x: (parent.width - self.width) / 2;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 10px;
+                                            height: 10px;
+                                            border-radius: 5px;
+                                            background: root.capture-color;
+                                        }
+                                        status-touch := TouchArea { }
+                                        if status-touch.has-hover: Rectangle {
+                                            x: parent.width + 10px;
+                                            y: (parent.height - self.height) / 2;
+                                            width: min(status-tip.preferred-width + 16px, 520px);
+                                            height: 26px;
+                                            border-radius: 6px;
+                                            background: Theme.surface-raised;
+                                            border-width: 1px;
+                                            border-color: Theme.control-border;
+                                            status-tip := Text {
+                                                x: 8px;
+                                                width: parent.width - 16px;
+                                                text: root.capture-state;
+                                                color: Theme.text;
+                                                font-size: 12px;
+                                                vertical-alignment: center;
+                                                overflow: elide;
+                                            }
+                                        }
+                                    }
+                                }
+                                HorizontalLayout { alignment: center; RailButton { icon: Icons.settings; tooltip: "Settings"; active: root.settings-open; clicked => { root.settings-open = true; } } }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------ settings dialog (zodiak's: tabs left, title and close on top)
+    if root.settings-open: Rectangle {
+        background: #07080cc9;
+        TouchArea { clicked => { root.settings-open = false; } }
+        Rectangle {
+            width: min(600px, parent.width - 48px);
+            height: min(520px, parent.height - 56px);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: #1a1b22;
+            border-radius: 16px;
+            border-width: 1px;
+            border-color: #3a3948;
+            drop-shadow-blur: 60px;
+            drop-shadow-color: #00000088;
+            clip: true;
+            TouchArea { }
+            HorizontalLayout {
+                Rectangle {
+                    width: 160px;
+                    background: #15161c;
+                    Rectangle { x: parent.width - 1px; width: 1px; background: Theme.border; }
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 5px;
+                        alignment: start;
+                        SettingsTab { icon: Icons.user-round; text: "General"; active: root.settings-tab == 0; clicked => { root.settings-tab = 0; } }
+                        SettingsTab { icon: Icons.monitor; text: "Overlays"; active: root.settings-tab == 1; clicked => { root.settings-tab = 1; } }
+                    }
+                }
+                VerticalLayout {
+                    Rectangle {
+                        height: 54px;
+                        HorizontalLayout {
+                            padding-left: 24px;
+                            padding-right: 14px;
+                            Text {
+                                text: root.settings-tab == 0 ? "General" : "Overlays";
+                                color: Theme.text;
+                                font-size: 14px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            IconButton { y: (parent.height - self.height) / 2; icon: Icons.x; clicked => { root.settings-open = false; } }
+                        }
+                        Rectangle { y: parent.height - 1px; height: 1px; background: Theme.border; }
+                    }
+                    Flickable {
+                        vertical-stretch: 1;
+                        content-height: panel.preferred-height;
+                        panel := VerticalLayout {
+                            padding-left: 24px;
+                            padding-right: 24px;
+                            padding-top: 20px;
+                            padding-bottom: 20px;
+                            spacing: 18px;
+                            alignment: start;
+
+                            if root.settings-tab == 0: VerticalLayout {
+                                spacing: 18px;
+                                VerticalLayout {
+                                    spacing: 8px;
+                                    FieldLabel { text: "Character name"; }
+                                    Rectangle {
+                                        height: 40px;
+                                        border-radius: 8px;
+                                        background: Theme.input;
+                                        border-width: 1px;
+                                        border-color: name-input.has-focus ? Theme.accent : Theme.border;
+                                        clip: true;
+                                        name-input := TextInput {
+                                            x: 12px;
+                                            width: parent.width - 24px;
+                                            height: parent.height;
+                                            vertical-alignment: center;
+                                            text <=> root.own-name;
+                                            color: Theme.text;
+                                            single-line: true;
+                                            edited => { root.own-name-edited(self.text); }
+                                        }
+                                        if root.own-name == "": Text {
+                                            x: 12px;
+                                            height: parent.height;
+                                            vertical-alignment: center;
+                                            text: "learned from the login";
+                                            color: #737585;
+                                        }
+                                    }
+                                }
+                                SwitchRow { text: "Reset on zone change"; checked <=> root.reset-on-zone; toggled(on) => { root.reset-on-zone-changed(on); } }
+                                Rectangle { height: 1px; background: Theme.border; }
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    Text { text: "Record game traffic"; color: #d0cfdd; font-size: 13px; vertical-alignment: center; }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    IconButton {
+                                        boxed: true;
+                                        active: root.recording;
+                                        icon: root.recording ? Icons.square : Icons.circle-dot;
+                                        clicked => { if (root.recording) { root.stop-recording(); } else { root.start-recording(); } }
+                                    }
+                                }
+                                if root.recording: Text { text: root.recording-text; color: #888b9e; font-size: 11px; wrap: word-wrap; }
+                            }
+
+                            if root.settings-tab == 1: VerticalLayout {
+                                spacing: 6px;
+                                SwitchRow { text: "Meter overlays"; shortcut: "Ctrl O"; checked <=> root.meter-overlay; toggled(on) => { root.meter-overlay-changed(on); } }
+                                SwitchRow { text: "Map overlay"; shortcut: "Ctrl M"; checked <=> root.map-overlay; toggled(on) => { root.map-overlay-changed(on); } }
+                                SwitchRow { text: "Lock, click through"; shortcut: "Ctrl L"; checked <=> root.overlays-locked; toggled(on) => { root.lock-changed(on); } }
+                                Rectangle { height: 12px; }
+                                Rectangle { height: 1px; background: Theme.border; }
+                                Rectangle { height: 12px; }
+                                for cfg in root.overlay-configs: VerticalLayout {
+                                    spacing: 8px;
+                                    padding-bottom: 14px;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        height: 30px;
+                                        Text { text: "Meter overlay " + cfg.id; color: #d0cfdd; font-size: 13px; vertical-alignment: center; }
+                                        Rectangle { horizontal-stretch: 1; }
+                                        IconButton {
+                                            y: (parent.height - self.height) / 2;
+                                            width: 28px;
+                                            height: 28px;
+                                            icon-size: 15px;
+                                            icon: Icons.x;
+                                            clicked => { root.overlay-remove(cfg.id); }
+                                        }
+                                        Toggle {
+                                            y: (parent.height - self.height) / 2;
+                                            checked: cfg.enabled;
+                                            toggled(on) => { root.overlay-changed({ id: cfg.id, enabled: on, metric: cfg.metric, range: cfg.range, scope: cfg.scope }); }
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        Dropdown {
+                                            horizontal-stretch: 1;
+                                            model: ["Damage", "Healing"];
+                                            current-index: cfg.metric;
+                                            selected(i) => { root.overlay-changed({ id: cfg.id, enabled: cfg.enabled, metric: i, range: cfg.range, scope: cfg.scope }); }
+                                        }
+                                        Dropdown {
+                                            horizontal-stretch: 1;
+                                            model: ["Fight", "Total"];
+                                            current-index: cfg.range;
+                                            selected(i) => { root.overlay-changed({ id: cfg.id, enabled: cfg.enabled, metric: cfg.metric, range: i, scope: cfg.scope }); }
+                                        }
+                                        Dropdown {
+                                            horizontal-stretch: 1;
+                                            model: ["All", "Group", "Me"];
+                                            current-index: cfg.scope;
+                                            selected(i) => { root.overlay-changed({ id: cfg.id, enabled: cfg.enabled, metric: cfg.metric, range: cfg.range, scope: i }); }
+                                        }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    alignment: start;
+                                    TextButton { icon: Icons.plus; text: "Add meter overlay"; clicked => { root.overlay-add(); } }
+                                }
+                                Rectangle { height: 12px; }
+                                Rectangle { height: 1px; background: Theme.border; }
+                                Rectangle { height: 12px; }
+                                VerticalLayout {
+                                    spacing: 6px;
+                                    HorizontalLayout {
+                                        FieldLabel { text: "Opacity"; horizontal-stretch: 1; }
+                                        FieldLabel { text: round(root.overlay-opacity * 100) + "%"; }
+                                    }
+                                    SliderBar { minimum: 0.2; maximum: 1.0; value <=> root.overlay-opacity; changed(v) => { root.opacity-changed(v); } }
+                                }
+                                Rectangle { height: 10px; }
+                                VerticalLayout {
+                                    spacing: 6px;
+                                    HorizontalLayout {
+                                        FieldLabel { text: "Map overlay radius"; horizontal-stretch: 1; }
+                                        FieldLabel { text: round(root.overlay-radius) + " m"; }
+                                    }
+                                    SliderBar { minimum: 25; maximum: 1000; value <=> root.overlay-radius; changed(v) => { root.overlay-radius-changed(v); } }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // the cube sound settings, drawn over the window; a click anywhere else closes them
+    if root.sound-panel-open: TouchArea {
+        clicked => { root.close-sound-panel(); }
+    }
+    if root.sound-panel-open: Rectangle {
+        x: min(root.sound-anchor.x + 30px - self.width, root.width - self.width - 8px);
+        y: root.sound-anchor.y + 36px;
+        width: 248px;
+        height: 104px;
+        background: Theme.surface;
+        border-radius: 10px;
+        border-width: 1px;
+        border-color: Theme.border;
+        drop-shadow-blur: 18px;
+        drop-shadow-color: #00000090;
+        TouchArea { }
+        VerticalLayout {
+            padding: 12px;
+            spacing: 12px;
+            HorizontalLayout {
+                spacing: 8px;
+                Icon {
+                    y: (parent.height - self.height) / 2;
+                    width: 16px;
+                    height: 16px;
+                    commands: Icons.volume-2;
+                    tint: Theme.muted;
+                }
+                SliderBar {
+                    horizontal-stretch: 1;
+                    minimum: 0;
+                    maximum: 100;
+                    value <=> root.cube-volume;
+                    changed(v) => { root.cube-volume-changed(v); }
+                }
+                Muted { text: round(root.cube-volume) + "%"; width: 36px; horizontal-alignment: right; }
+            }
+            TextButton {
+                primary: root.sound-testing;
+                icon: root.sound-testing ? Icons.square : Icons.play;
+                text: root.sound-testing ? "Stop" : "Test";
+                clicked => {
+                    root.sound-testing = !root.sound-testing;
+                    root.test-cube-sound(root.sound-testing);
+                }
+            }
+        }
+    }
+
+    if !root.is-maximized: Rectangle {
+        property <length> e: 5px;
+        property <length> c: 12px;
+        TouchArea { x: c; y: 0; width: parent.width - 2 * c; height: e; mouse-cursor: n-resize; pointer-event(ev) => { if (ev.kind == PointerEventKind.down) { root.window-resize(0); } } }
+        TouchArea { x: c; y: parent.height - e; width: parent.width - 2 * c; height: e; mouse-cursor: s-resize; pointer-event(ev) => { if (ev.kind == PointerEventKind.down) { root.window-resize(1); } } }
+        TouchArea { x: parent.width - e; y: c; width: e; height: parent.height - 2 * c; mouse-cursor: e-resize; pointer-event(ev) => { if (ev.kind == PointerEventKind.down) { root.window-resize(2); } } }
+        TouchArea { x: 0; y: c; width: e; height: parent.height - 2 * c; mouse-cursor: w-resize; pointer-event(ev) => { if (ev.kind == PointerEventKind.down) { root.window-resize(3); } } }
+        TouchArea { x: parent.width - c; y: 0; width: c; height: e; mouse-cursor: ne-resize; pointer-event(ev) => { if (ev.kind == PointerEventKind.down) { root.window-resize(4); } } }
+        TouchArea { x: 0; y: 0; width: c; height: e; mouse-cursor: nw-resize; pointer-event(ev) => { if (ev.kind == PointerEventKind.down) { root.window-resize(5); } } }
+        TouchArea { x: parent.width - c; y: parent.height - c; width: c; height: c; mouse-cursor: se-resize; pointer-event(ev) => { if (ev.kind == PointerEventKind.down) { root.window-resize(6); } } }
+        TouchArea { x: 0; y: parent.height - c; width: c; height: c; mouse-cursor: sw-resize; pointer-event(ev) => { if (ev.kind == PointerEventKind.down) { root.window-resize(7); } } }
+    }
+}

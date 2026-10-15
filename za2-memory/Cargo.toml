@@ -1,0 +1,7 @@
+[package]
+name = "za2-memory"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+za2-core = { path = "../za2-core" }

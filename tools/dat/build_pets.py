@@ -1,0 +1,152 @@
+"""Builds assets/pets/pets.json: the pets of the pet window, their names, and which monsters belong to which pet.
+
+Usage:  python3 build_pets.py <VehicleList.bin> <NpcData.bin> <npc_names.json> <l10n dir> <out.json> [extra.json] [Item.bin] [NpcLoot.bin]
+
+VehicleList.bin and NpcData.bin are the decrypted tables (dectable.py, from pakchunk401000-Windows_0_P.pak), the l10n dir is the
+output of extract_l10n.py. A pet row is `[i32 petId][str_veh_<key>]...`; a monster row is `[i32 npcId]...[MOB_<model>]`. The game
+names a pet after the model of the monsters that drop its soul (Cherubim_02 <- MOB_Cherubim_02), which was checked against
+1,022 soul drops in real captures (59 of 63 souls: the monster killed right before the drop had exactly that model). The few
+that do not follow the rule live in `extra.json` ({"models": {"<pet key>": "<model>"}, "npcs": {"<npc id>": "<pet key>"}}).
+"""
+import bisect
+import json
+import struct
+import sys
+
+KEY = bytes([0x25, 0, 0xA8, 0, 0x7E, 0, 0x91, 0])
+LANGS = {"en": "en-US", "de": "de-DE", "fr": "fr-FR", "es": "es-ES", "ru": "ru-RU", "pt": "pt-BR", "ja": "ja-JP", "ko": "ko-KR"}
+
+
+def strings(b):
+    """The XOR-ed UTF-16 FStrings of a table: (offset of the length field, text)."""
+    out, i = [], 0
+    while i < len(b) - 8:
+        n = struct.unpack_from("<i", b, i)[0]
+        if -90 <= n <= -2:
+            raw = b[i + 4:i + 4 + 2 * -n]
+            if len(raw) == 2 * -n and raw[-2:] == b"\0\0":
+                text = bytes(raw[k] ^ KEY[k % 8] for k in range(len(raw)))[:-2]
+                try:
+                    s = text.decode("utf-16-le")
+                except UnicodeDecodeError:
+                    s = ""
+                if s and s.isprintable():
+                    out.append((i, s))
+                    i += 4 + 2 * -n
+                    continue
+        i += 1
+    return out
+
+
+def shop_items(vehicles, vehicle_strings, items, item_strings):
+    """The pet items the Black Cloud shop sells: item id -> pet id. A pet row of VehicleList names its own item ("Vehicle_<model>_A_01_b",
+    a few strings after the pet's key; the model spelling differs from the pet key now and then: ForestAr01_V01 for ForestArc_01_V01)."""
+    item_id = {s.lower(): struct.unpack_from("<I", items, offset - 4)[0] for offset, s in item_strings if s.startswith("Vehicle_") and s.endswith("_A_01_b")}
+    out = {}
+    for index, (offset, s) in enumerate(vehicle_strings):
+        if not s.startswith("str_veh_"):
+            continue
+        pet_id = struct.unpack_from("<I", vehicles, offset - 4)[0]
+        item = next((t for _, t in vehicle_strings[index + 1:index + 8] if t.startswith("Vehicle_") and t.endswith("_A_01_b")), None)
+        if item and item.lower() in item_id:
+            out[str(item_id[item.lower()])] = pet_id
+    return out
+
+
+def main():
+    vehicle_path, npc_path, npc_names_path, l10n_dir, out_path = sys.argv[1:6]
+    extra = json.load(open(sys.argv[6])) if len(sys.argv) > 6 else {}
+    vehicles = open(vehicle_path, "rb").read()
+    pets = {}
+    categories = {}
+    table_strings = strings(vehicles)
+    for index, (offset, s) in enumerate(table_strings):
+        if s.startswith("str_veh_"):
+            pet_id = struct.unpack_from("<I", vehicles, offset - 4)[0]
+            pets[pet_id] = s[len("str_veh_"):]
+            # the row names its species a few strings later: ECreatureType::Intellect / Feral / Nature / Trans / Special
+            categories[pet_id] = next((t.split("::")[1] for _, t in table_strings[index + 1:index + 8] if t.startswith("ECreatureType::")), "")
+
+    l10n = {lang: json.load(open(f"{l10n_dir}/l10n_{code}.json", encoding="utf-8")) for lang, code in LANGS.items()}
+    folded = {lang: {k.upper(): v for k, v in table.items()} for lang, table in l10n.items()}
+    models = {k.lower(): v for k, v in extra.get("models", {}).items()}
+    alias = {v.lower(): k for k, v in extra.get("models", {}).items()}  # BeritraC_03 -> Beritra03 (the item is named after the other spelling)
+    out_pets = {}
+    for pet_id, key in sorted(pets.items()):
+        # the pet item "<key>_A_01_B_body", else the shop variant, else the pet's own string "str_veh_<key>"
+        spellings = [key] + ([alias[key.lower()]] if key.lower() in alias else [])
+        candidates = [f"String_STR_ITEM_{prefix}VEHICLE_{k}_A_01_B_body" for k in spellings for prefix in ("", "BM_")] + [f"String_str_veh_{key}_body"]
+        names = {}
+        for lang, table in folded.items():
+            text = next((table[c.upper()] for c in candidates if c.upper() in table), None)
+            if text:
+                names[lang] = text.split(":", 1)[1].strip() if ":" in text else text
+        out_pets[str(pet_id)] = {"key": key, "category": categories.get(pet_id, ""), "names": names}
+
+    npcs = open(npc_path, "rb").read()
+    table = strings(npcs)
+    offsets = [o for o, _ in table]
+    by_key = {key.lower(): pet_id for pet_id, key in pets.items()}
+    # a pet may be reached by a differently spelled model (Beritra03 <- BeritraC_03)
+    wanted = {models.get(key.lower(), key).lower(): pet_id for key, pet_id in ((k, by_key[k.lower()]) for k in pets.values())}
+    # every monster the meter names: find its id in the table, the model is one of the next strings of that row
+    monsters = {}
+    for npc_id in json.load(open(npc_names_path)):
+        needle = struct.pack("<i", int(npc_id))
+        at = npcs.find(needle)
+        while at != -1:
+            first = bisect.bisect_right(offsets, at)
+            row = table[first:first + 6]
+            if row and row[0][0] - at <= 16:
+                model = next((t[4:] for _, t in row if t.startswith("MOB_")), None)
+                if model:
+                    if model.lower() in wanted:
+                        monsters.setdefault(npc_id, set()).add(wanted[model.lower()])
+                    break
+            at = npcs.find(needle, at + 1)
+    for npc_id, key in extra.get("npcs", {}).items():
+        monsters.setdefault(npc_id, set()).add(by_key[key.lower()])
+    # the soul items ("VehicleSoul_<key>_A_01_b", what a monster drops of a pet) by item id, from the Item table
+    souls = {}
+    shop = {}
+    if len(sys.argv) > 7:
+        items = open(sys.argv[7], "rb").read()
+        shop = shop_items(vehicles, table_strings, items, strings(items))
+        for offset, s in strings(items):
+            if s.startswith("VehicleSoul_") and s.endswith("_A_01_b") and s[12:-7].lower() in by_key:
+                souls[str(struct.unpack_from("<I", items, offset - 4)[0])] = by_key[s[12:-7].lower()]
+    # NpcLoot rows are [id][npc id][item id]: the monsters the client itself lists as dropping a pet soul
+    loot_routes = 0
+    if len(sys.argv) > 8 and souls:
+        loot = open(sys.argv[8], "rb").read()
+        for item_id, pet_id in souls.items():
+            needle = struct.pack("<I", int(item_id))
+            at = loot.find(needle)
+            while at != -1:
+                if at >= 4:
+                    npc_id = struct.unpack_from("<I", loot, at - 4)[0]
+                    if 1_000_000 <= npc_id <= 9_999_999 and pet_id not in monsters.get(str(npc_id), set()):
+                        monsters.setdefault(str(npc_id), set()).add(pet_id)
+                        loot_routes += 1
+                at = loot.find(needle, at + 1)
+    # "Tamed <pet>" NPCs are friendly companions of quests and garrisons (one stands in the Dawn Legion Recovery Room): not farmable, so no spawn.
+    # Except the five the client's own "Fundorte" page (ItemGetRoute) lists under the soul's Monsterbeute: they do drop it (NPC id -> pet id).
+    TAMED_SOURCES = {2400414: 1004, 2100802: 1097, 2100805: 1097, 2400611: 1106, 2400503: 1203}  # Fossa, Karnif x2, Tayga, Tamed Karnif
+    names = json.load(open(npc_names_path))
+    for npc_id in [k for k in monsters if str((names.get(k) or {}).get("en", "")).startswith("Tamed ")]:
+        del monsters[npc_id]
+    for npc_id, pet_id in TAMED_SOURCES.items():
+        monsters.setdefault(str(npc_id), set()).add(pet_id)
+    # pets without a place in the world: the client lists only quest rewards and chests for them, the models of their look-alike monsters (Red Shell Mole) are not their source
+    no_field = {by_key["mole_01"]}  # Armadon
+    for npc_id in list(monsters):
+        monsters[npc_id] -= no_field
+        if not monsters[npc_id]:
+            del monsters[npc_id]
+    out_monsters = {k: (next(iter(v)) if len(v) == 1 else sorted(v)) for k, v in monsters.items()}
+    json.dump({"pets": out_pets, "monsters": out_monsters, "souls": souls, "shop": shop}, open(out_path, "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":"))
+    print(f"{len(out_pets)} pets, {len(monsters)} monsters, {len(souls)} souls, {loot_routes} monster routes added from NpcLoot")
+
+
+if __name__ == "__main__":
+    main()

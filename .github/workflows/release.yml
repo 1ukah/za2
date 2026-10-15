@@ -1,0 +1,67 @@
+name: Build and release Linux archive
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build za2 archive
+    # The oldest supported runner: the binaries then run on distributions with an older glibc too.
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Confirm tag matches VERSION and master
+        run: |
+          version="$(tr -d '[:space:]' < VERSION)"
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "The pushed tag ($GITHUB_REF_NAME) must match VERSION (v$version)." >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor HEAD origin/master; then
+            echo "Release $version must point to a commit on the master branch." >&2
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libpcap-dev libfontconfig1-dev libfreetype-dev
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo builds
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: cargo test --release --locked
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Pack archive
+        run: |
+          name="za2-$VERSION-linux-x86_64"
+          mkdir -p "$name/bin"
+          cp target/release/za2 target/release/za2-capture target/release/za2-memory target/release/za2-replay "$name/bin/"
+          cp -r assets "$name/assets"
+          cp za2/ui/brand/icon-256.png "$name/za2.png"
+          cp install.sh LICENSE README.md "$name/"
+          tar czf "$name.tar.gz" "$name"
+          echo "ARCHIVE=$name.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" "$ARCHIVE" --title "za2 $VERSION" --generate-notes

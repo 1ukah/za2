@@ -1,0 +1,146 @@
+"""Reads the spawn points of gatherable objects (herbs, ores, wood, cotton, gems, Od, ...) out of the client's per-map files and writes them next
+to the names of the objects.
+
+Usage:  python3 build_gather.py <dir with the unpacked AION2/Content/Data/Map> <EnvObjData.bin> <l10n dir> <out.json>
+
+EnvObjData.bin is the decrypted table (dectable.py). An object row is `[i32 id]['TableItemId'... key][desc key]...['EEnvObjectUsage::GatherSource']
+['Gather_<Type>_lv<n>_...']`: the usage says that it is a gather source and the next name gives the kind. A MapData.dat (XOR 25 a8 7e 91, see
+build_spawns.py) holds `EnvObjIdList` (u64 ids) followed by `Positions` (x, y, z) for every placement; the desc key `EnvObjData_<key>_desc` is the
+name in the l10n files.
+"""
+import json
+import os
+import re
+import struct
+import sys
+
+from build_pets import strings
+import build_spawns as bs
+
+# the kinds of the table -> what the client shows (OdCube and Source never stand on a world map)
+CATEGORY = {"Od": "Od", "Herb": "Herb", "Food": "Food", "Ore": "Ore", "RareOre": "Ore", "Wood": "Wood", "Cotton": "Cotton",
+            "Gemstone": "Gemstone", "Jewelry": "Gemstone", "Fragment": "Fragment"}
+WORLD_MAPS = ("World/World_L/World_L_A", "World/World_D/World_D_A", "Intersever/Abyss/Abyss_Reshanta_A")
+LANGS = {"en": "en-US", "de": "de-DE", "fr": "fr-FR", "es": "es-ES", "ru": "ru-RU", "pt": "pt-BR", "ja": "ja-JP", "ko": "ko-KR"}
+
+
+def kind_of(key, usage, gather_name):
+    """The kind of collectible: a gather source by what it gives (Od, Ore, Herb, Food, Wood, Cotton, Gemstone, RareOre, Jewelry), the Od energy cubes, the
+    fragments (the "traces" of a region) - or None for every other object."""
+    if usage == "EEnvObjectUsage::GatherSource" and gather_name:
+        parts = gather_name.split("_")
+        return parts[2] if parts[1] == "Source" and len(parts) > 2 else parts[1]
+    if usage == "EEnvObjectUsage::OdEnergyCube":
+        return "OdCube"
+    if "_fragment_" in key:
+        return "Fragment"
+    return None
+
+
+def gatherables(table):
+    """env id -> (key, kind) for every collectible row of the table."""
+    b = open(table, "rb").read()
+    ss = strings(b)
+    out = {}
+    for i, (_, s) in enumerate(ss):
+        if s != "TableItemId" or i + 12 >= len(ss):
+            continue
+        key = ss[i + 1]
+        usage = next((x for _, x in ss[i + 1:i + 12] if x.startswith("EEnvObjectUsage::")), "")
+        gather = next((x for _, x in ss[i + 1:i + 12] if x.startswith("Gather_")), "")
+        kind = kind_of(key[1], usage, gather)
+        if kind:
+            out[struct.unpack_from("<i", b, key[0] - 4)[0]] = (key[1], kind)
+    return out
+
+
+NONE = b"\x05\x00\x00\x00None\x00"
+
+
+def placements(path):
+    """Yield (env ids, [(x, y, z), ...]) for every placement group of a MapData.dat.
+
+    A group's `Positions` is an array of MapData_Position entries (location x y z, rotation x y z: 6 five-byte doubles, 48 bytes), one per
+    place the object can stand; its byte size sits 12 bytes before the type name, as for the Hidden Cube groups (build_hidden_cubes.py).
+    Until 2026-10-15 only the first entry was read, so every group gave one place (3 Rubies in Altgard instead of all of them)."""
+    raw = open(path, "rb").read()
+    p = bytes(raw[i] ^ bs.KEY[i % 4] for i in range(len(raw)))
+    for m in re.finditer(rb"EnvObjIdList\x00", p):
+        end = p.find(NONE, m.end())
+        seg = p[m.end():(end if 0 <= end - m.end() < 1 << 20 else m.end() + 400)]
+        ti = seg.find(b"TableItemId\x00")
+        pm = seg.find(b"Positions\x00")
+        pi = seg.find(b"MapData_Position\x00")
+        if ti < 0 or pm < 0 or pi < 0 or len(seg) < pi + 17 + 20 + 24:
+            continue
+        body = seg[ti + 12 + 17:pm - 8]
+        ids = [v for v in (struct.unpack_from("<Q", body, q)[0] for q in range(0, len(body) - 7, 8)) if v]
+        d = seg[pi + 17 + 20:]
+        size = struct.unpack_from("<Q", seg, pi - 12)[0]
+        points = []
+        for n in range(min(size // 48, len(d) // 48)):
+            pos = [bs.dbl(struct.unpack_from("<Q", d, 48 * n + 8 * k)[0]) for k in range(3)]
+            if all(abs(c) < 1e7 for c in pos) and (pos[0] or pos[1]):
+                points.append(pos)
+        if not points:
+            points = [[bs.dbl(struct.unpack_from("<Q", d, 8 * n)[0]) for n in range(3)]]
+        yield ids, points
+
+
+def main():
+    root, table, l10n_dir, out_path = sys.argv[1:5]
+    gather = gatherables(table)
+    names = {}
+    for code, file in LANGS.items():
+        data = json.load(open(os.path.join(l10n_dir, f"l10n_{file}.json"), encoding="utf-8"))
+        for env_id, (key, _) in gather.items():
+            text = data.get(f"EnvObjData_{key}_desc")
+            if text:
+                names.setdefault(str(env_id), {})[code] = text
+    maps = {}
+    total = 0
+    for folder, _, files in os.walk(root):
+        if "MapData.dat" not in files:
+            continue
+        name = os.path.relpath(folder, root).replace(os.sep, "/")
+        if name not in WORLD_MAPS:
+            continue
+        per = {}
+        for ids, points in placements(os.path.join(folder, "MapData.dat")):
+            for env_id in ids:
+                if env_id not in gather or gather[env_id][1] not in CATEGORY:
+                    continue
+                for pos in points:
+                    if all(abs(c) < 1e7 for c in pos):
+                        per.setdefault(str(env_id), []).append([round(c) for c in pos])
+                        total += 1
+        if per:
+            maps[name] = per
+    count = {}
+    for per in maps.values():
+        for k, pts in per.items():
+            count[k] = count.get(k, 0) + len(pts)
+    # every collectible the client could offer, also those with no fixed place on a world map (count 0)
+    kinds = {str(i): {"kind": CATEGORY[kind], "names": names.get(str(i), {}), "count": count.get(str(i), 0)}
+             for i, (key, kind) in sorted(gather.items())
+             if kind in CATEGORY and names.get(str(i)) and (key.startswith("Gather_Source_") or count.get(str(i), 0) > 0 or kind == "Fragment")}
+    # the Hidden Cubes: one object "Cube" whose places are the candidate spawn points of all cube groups (see build_hidden_cubes.py)
+    import build_hidden_cubes as hc
+    cube_names, cube_maps = hc.build(root, table, {lang: json.load(open(os.path.join(l10n_dir, f"l10n_{code}.json"), encoding="utf-8")) for lang, code in LANGS.items()})
+    # the groups themselves too: the server keeps a few cubes of a group out at a time and puts a new one at another place of the same
+    # group when one is taken, so the map can show the places of the group a cube was found in
+    cube_total = 0
+    cube_groups = {}
+    for map_key, rows in cube_maps.items():
+        table_name = hc.WORLD[map_key]
+        pts = list(dict.fromkeys(tuple(pt) for row in rows for pt in row["points"]))
+        maps.setdefault(table_name, {})["cube"] = [list(pt) for pt in pts]
+        cube_groups[table_name] = [{"group": row["group"], "points": row["points"]} for row in rows]
+        cube_total += len(pts)
+    kinds["cube"] = {"kind": "Cube", "names": cube_names, "count": cube_total}
+    json.dump({"objects": kinds, "maps": maps, "cubeGroups": cube_groups}, open(out_path, "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":"))
+    print(f"{len(kinds)} gatherable objects, {len(maps)} maps, {total} placements -> {out_path} ({os.path.getsize(out_path) // 1024} KB)")
+
+
+if __name__ == "__main__":
+    main()
