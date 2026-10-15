@@ -16,7 +16,7 @@ za2 is a DPS meter and interactive map for Aion 2 on Linux. It reads the game tr
 
 ## Install
 
-1. Download `za2-<version>-linux-x86_64.tar.gz` from the [releases](../../releases).
+1. Download `za2-<version>-linux-x86_64.tar.gz` from the [releases](https://github.com/1ukah/za2/releases).
 2. Extract the archive.
 3. In the extracted folder, run:
 

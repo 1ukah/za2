@@ -16,7 +16,7 @@
 ## Build
 
 ```sh
-git clone <repository URL> za2
+git clone https://github.com/1ukah/za2.git
 cd za2
 cargo build --release
 ```
