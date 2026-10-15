@@ -1,6 +1,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const COMMANDS: [&str; 7] = ["show", "reset", "toggle-overlay", "toggle-map-overlay", "toggle-lock", "map-zoom-in", "map-zoom-out"];
 
@@ -23,6 +24,7 @@ pub fn listen(handler: impl Fn(String) + Send + 'static) {
         let _ = std::fs::remove_file(&path);
     }
     let Ok(listener) = UnixListener::bind(&path) else { return };
+    OWNS_SOCKET.store(true, Ordering::Relaxed);
     std::thread::Builder::new()
         .name("za2-control".into())
         .spawn(move || {
@@ -39,6 +41,12 @@ pub fn listen(handler: impl Fn(String) + Send + 'static) {
         .ok();
 }
 
+/// Set when this instance bound the socket. A second instance finds it taken and must not remove it on exit, or
+/// `za2 --send` stops reaching the first one.
+static OWNS_SOCKET: AtomicBool = AtomicBool::new(false);
+
 pub fn cleanup() {
-    let _ = std::fs::remove_file(socket_path());
+    if OWNS_SOCKET.load(Ordering::Relaxed) {
+        let _ = std::fs::remove_file(socket_path());
+    }
 }

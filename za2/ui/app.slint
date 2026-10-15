@@ -4,8 +4,9 @@ export struct MeterRow {
     id: int,
     name: string,
     class-name: string,
-    gear-score: string,
-    power: string,
+    class-icon: image,
+    // combat power and gear score: "113k · 2,410" (party members only)
+    gear: string,
     damage: string,
     dps: string,
     share: float,
@@ -19,9 +20,10 @@ export struct MeterRow {
 
 // One player in an overlay: damage or healing of the fight or the total.
 export struct OverlayRow {
+    id: int,
     name: string,
-    gear-score: string,
-    power: string,
+    class-icon: image,
+    gear: string,
     value: string,
     rate: string,
     share: float,
@@ -40,6 +42,7 @@ export struct OverlayConfigRow {
 }
 
 export struct SkillRow {
+    icon: image,
     name: string,
     total: string,
     hits: string,
@@ -60,6 +63,8 @@ export struct MapMarker {
     y: length,
     size: length,
     color: color,
+    // game icon drawn instead of the dot (empty: a dot)
+    icon: image,
     live: bool,
     // 1 above the player, -1 below, 0 level or unknown
     level: int,
@@ -76,6 +81,10 @@ export struct FilterRow {
     // some but not all items of a group are selected
     partial: bool,
     color: color,
+    // game icon of the resource kind or the pet (empty: the coloured dot)
+    icon: image,
+    // a monster under its pet: indented
+    child: bool,
 }
 
 // The zodiak palette.
@@ -301,6 +310,8 @@ component CheckRow inherits Rectangle {
     in property <bool> checked;
     in property <bool> partial;
     in property <color> dot: transparent;
+    // shown instead of the dot when there is one; the dot colour becomes its ring
+    in property <image> icon;
     in property <length> indent: 0px;
     callback toggled(bool);
     height: 30px;
@@ -316,7 +327,23 @@ component CheckRow inherits Rectangle {
             checked: root.checked;
             partial: root.partial;
         }
-        if root.dot != transparent: Rectangle {
+        if root.icon.width > 0: Rectangle {
+            width: 22px;
+            height: 22px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 11px;
+            border-width: root.dot != transparent ? 2px : 0px;
+            border-color: root.dot;
+            Image {
+                x: 2px;
+                y: 2px;
+                width: 18px;
+                height: 18px;
+                source: root.icon;
+                image-fit: contain;
+            }
+        }
+        if root.icon.width == 0 && root.dot != transparent: Rectangle {
             width: 8px;
             height: 8px;
             y: (parent.height - self.height) / 2;
@@ -746,15 +773,25 @@ component MapView inherits Rectangle {
         image-fit: fill;
     }
 
+    // a dot, or the game icon in a ring of the marker colour (a cube's group, a pet's palette colour)
     for m in markers: Rectangle {
         x: m.x - m.size / 2;
         y: m.y - m.size / 2;
         width: m.size;
         height: m.size;
         border-radius: m.size / 2;
-        background: m.color;
-        border-width: m.live ? 2px : 1px;
-        border-color: m.live ? #ffffff : #00000099;
+        background: m.icon.width > 0 ? #000000a0 : m.color;
+        border-width: m.icon.width > 0 ? 2px : m.live ? 2px : 1px;
+        border-color: m.icon.width > 0 ? (m.live ? m.color : m.color.with-alpha(0.6)) : m.live ? #ffffff : #00000099;
+        if m.icon.width > 0: Image {
+            x: 2px;
+            y: 2px;
+            width: parent.width - 4px;
+            height: parent.height - 4px;
+            source: m.icon;
+            image-fit: contain;
+            opacity: m.live ? 1 : 0.8;
+        }
         if m.level != 0: Path {
             x: m.size - 3px;
             y: -6px;
@@ -822,6 +859,20 @@ component MapView inherits Rectangle {
     }
 }
 
+// An icon in a row (class emblem, skill), centred vertically; keeps its place when there is no image.
+component ClassIcon inherits Rectangle {
+    in property <image> source;
+    in property <length> size: 16px;
+    width: size;
+    Image {
+        y: (root.height - root.size) / 2;
+        width: root.size;
+        height: root.size;
+        source: root.source;
+        image-fit: contain;
+    }
+}
+
 // ---------------------------------------------------------------- meter rows
 
 component RowBar inherits Rectangle {
@@ -856,34 +907,35 @@ component RowBar inherits Rectangle {
             width: 16px;
             vertical-alignment: center;
         }
+        ClassIcon {
+            source: data.class-icon;
+            size: compact ? 16px : 22px;
+        }
         VerticalLayout {
             horizontal-stretch: 1;
             alignment: center;
-            Text {
-                text: data.name + (data.estimated ? " ~" : "");
-                color: data.local ? Theme.accent : Theme.text;
-                font-weight: data.local ? 700 : 500;
-                overflow: elide;
+            HorizontalLayout {
+                spacing: 6px;
+                Text {
+                    text: data.name + (data.estimated ? " ~" : "");
+                    color: data.local ? Theme.accent : Theme.text;
+                    font-weight: data.local ? 700 : 500;
+                    overflow: elide;
+                    horizontal-stretch: 0;
+                }
+                if data.gear != "": Text {
+                    text: data.gear;
+                    color: Theme.faint;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
+                Rectangle { horizontal-stretch: 1; }
             }
             if !compact && data.class-name != "": Text {
                 text: data.class-name;
                 color: Theme.faint;
                 font-size: 11px;
             }
-        }
-        if !compact: Text {
-            text: data.gear-score;
-            color: Theme.muted;
-            vertical-alignment: center;
-            horizontal-alignment: right;
-            width: 48px;
-        }
-        if !compact: Text {
-            text: data.power;
-            color: Theme.muted;
-            vertical-alignment: center;
-            horizontal-alignment: right;
-            width: 64px;
         }
         Text {
             text: data.damage;
@@ -927,11 +979,56 @@ component RowBar inherits Rectangle {
 
 // ---------------------------------------------------------------- overlays
 
+// One skill of the breakdown: icon, name, total, hits, crit, on a bar as wide as its share.
+component SkillBar inherits Rectangle {
+    in property <SkillRow> data;
+    in property <bool> compact;
+    height: compact ? 22px : 26px;
+    border-radius: compact ? 5px : 6px;
+    clip: true;
+    background: compact ? #ffffff08 : Theme.surface-raised;
+    Rectangle {
+        x: 0;
+        width: parent.width * root.data.share;
+        background: Theme.accent.with-alpha(0.16);
+    }
+    HorizontalLayout {
+        padding-left: compact ? 4px : 6px;
+        padding-right: 8px;
+        spacing: compact ? 6px : 8px;
+        ClassIcon { source: root.data.icon; size: compact ? 18px : 22px; }
+        Text { text: root.data.name; color: Theme.text; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
+        Text { text: root.data.total; color: Theme.text; font-weight: 600; width: compact ? 48px : 64px; horizontal-alignment: right; vertical-alignment: center; }
+        Text { text: root.data.hits; color: Theme.muted; width: compact ? 28px : 36px; horizontal-alignment: right; vertical-alignment: center; }
+        Text { text: root.data.crit; color: Theme.muted; width: compact ? 32px : 40px; horizontal-alignment: right; vertical-alignment: center; }
+    }
+}
+
+// Edges and corners that resize a frameless window: 0 n, 1 s, 2 e, 3 w, 4 ne, 5 nw, 6 se, 7 sw.
+component ResizeGrips inherits Rectangle {
+    in property <length> e: 5px;
+    in property <length> c: 12px;
+    callback resize(int);
+    TouchArea { x: c; y: 0; width: parent.width - 2 * c; height: e; mouse-cursor: n-resize; pointer-event(ev) => { if (ev.kind == PointerEventKind.down) { root.resize(0); } } }
+    TouchArea { x: c; y: parent.height - e; width: parent.width - 2 * c; height: e; mouse-cursor: s-resize; pointer-event(ev) => { if (ev.kind == PointerEventKind.down) { root.resize(1); } } }
+    TouchArea { x: parent.width - e; y: c; width: e; height: parent.height - 2 * c; mouse-cursor: e-resize; pointer-event(ev) => { if (ev.kind == PointerEventKind.down) { root.resize(2); } } }
+    TouchArea { x: 0; y: c; width: e; height: parent.height - 2 * c; mouse-cursor: w-resize; pointer-event(ev) => { if (ev.kind == PointerEventKind.down) { root.resize(3); } } }
+    TouchArea { x: parent.width - c; y: 0; width: c; height: e; mouse-cursor: ne-resize; pointer-event(ev) => { if (ev.kind == PointerEventKind.down) { root.resize(4); } } }
+    TouchArea { x: 0; y: 0; width: c; height: e; mouse-cursor: nw-resize; pointer-event(ev) => { if (ev.kind == PointerEventKind.down) { root.resize(5); } } }
+    TouchArea { x: parent.width - c; y: parent.height - c; width: c; height: c; mouse-cursor: se-resize; pointer-event(ev) => { if (ev.kind == PointerEventKind.down) { root.resize(6); } } }
+    TouchArea { x: 0; y: parent.height - c; width: c; height: c; mouse-cursor: sw-resize; pointer-event(ev) => { if (ev.kind == PointerEventKind.down) { root.resize(7); } } }
+}
+
+// A player in a meter overlay. A click shows the skills of the player; Ctrl+drag moves the overlay.
 component OverlayRowBar inherits Rectangle {
     in property <OverlayRow> data;
+    in property <bool> selected;
+    in property <bool> clickable;
+    callback clicked;
+    callback drag();
     height: 24px;
     border-radius: 5px;
-    background: #ffffff08;
+    background: root.selected ? Theme.accent-soft : touch.has-hover ? #ffffff14 : #ffffff08;
     clip: true;
     Rectangle {
         x: 0;
@@ -943,20 +1040,38 @@ component OverlayRowBar inherits Rectangle {
         width: 3px;
         background: root.data.color;
     }
-    HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 8px;
-        spacing: 8px;
-        Text {
-            text: root.data.name;
-            color: root.data.local ? Theme.accent : Theme.text;
-            font-weight: root.data.local ? 700 : 500;
-            vertical-alignment: center;
-            overflow: elide;
-            horizontal-stretch: 1;
+    touch := TouchArea {
+        enabled: root.clickable;
+        property <bool> moving;
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                self.moving = e.modifiers.control;
+                if (self.moving) { root.drag(); }
+            }
         }
-        Text { text: root.data.gear-score; color: Theme.faint; font-size: 11px; vertical-alignment: center; horizontal-alignment: right; width: 34px; }
-        Text { text: root.data.power; color: Theme.faint; font-size: 11px; vertical-alignment: center; horizontal-alignment: right; width: 46px; }
+        clicked => {
+            if (!self.moving) { root.clicked(); }
+        }
+    }
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 8px;
+        spacing: 6px;
+        ClassIcon { source: root.data.class-icon; size: 16px; }
+        HorizontalLayout {
+            horizontal-stretch: 1;
+            spacing: 6px;
+            Text {
+                text: root.data.name;
+                color: root.data.local ? Theme.accent : Theme.text;
+                font-weight: root.data.local ? 700 : 500;
+                vertical-alignment: center;
+                overflow: elide;
+                horizontal-stretch: 0;
+            }
+            if root.data.gear != "": Text { text: root.data.gear; color: Theme.faint; font-size: 11px; vertical-alignment: center; }
+            Rectangle { horizontal-stretch: 1; }
+        }
         Text { text: root.data.value; color: Theme.muted; vertical-alignment: center; horizontal-alignment: right; width: 48px; }
         Text { text: root.data.rate; color: Theme.text; font-weight: 700; vertical-alignment: center; horizontal-alignment: right; width: 48px; }
         Text { text: root.data.share-text; color: Theme.muted; vertical-alignment: center; horizontal-alignment: right; width: 34px; }
@@ -969,8 +1084,14 @@ export component MeterOverlay inherits Window {
     in property <string> overlay-title: "za2 DPS overlay";
     in property <bool> locked;
     in property <float> overlay-opacity: 0.85;
+    // the player whose skills show under the rows (-1: none)
+    in property <int> selected-id: -1;
+    in property <string> skills-title;
+    in property <[SkillRow]> skills;
     callback drag();
     callback toggle-lock();
+    callback select(int);
+    callback resize(int);
     title: root.overlay-title;
     icon: @image-url("brand/icon-256.png");
     no-frame: true;
@@ -1003,8 +1124,45 @@ export component MeterOverlay inherits Window {
                 overflow: elide;
                 vertical-alignment: center;
             }
-            for row in root.rows: OverlayRowBar { data: row; }
-            Rectangle { }
+            for row in root.rows: OverlayRowBar {
+                data: row;
+                clickable: !root.locked;
+                selected: row.id == root.selected-id;
+                clicked => { root.select(row.id == root.selected-id ? -1 : row.id); }
+                drag => { root.drag(); }
+            }
+            if root.selected-id >= 0: Rectangle {
+                height: 1px;
+                background: Theme.border;
+            }
+            if root.selected-id >= 0: HorizontalLayout {
+                height: 20px;
+                spacing: 4px;
+                Text {
+                    text: root.skills-title;
+                    color: Theme.muted;
+                    font-size: 11px;
+                    font-weight: 600;
+                    overflow: elide;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                if !root.locked: IconButton {
+                    width: 20px;
+                    height: 20px;
+                    icon-size: 13px;
+                    icon: Icons.x;
+                    clicked => { root.select(-1); }
+                }
+            }
+            if root.selected-id >= 0: ListView {
+                vertical-stretch: 1;
+                for k in root.skills: VerticalLayout {
+                    padding-bottom: 2px;
+                    SkillBar { data: k; compact: true; }
+                }
+            }
+            if root.selected-id < 0: Rectangle { }
         }
         if !root.locked: IconButton {
             x: parent.width - self.width - 4px;
@@ -1016,6 +1174,7 @@ export component MeterOverlay inherits Window {
             icon: Icons.lock-open;
             clicked => { root.toggle-lock(); }
         }
+        if !root.locked: ResizeGrips { resize(edge) => { root.resize(edge); } }
     }
 }
 
@@ -1032,9 +1191,14 @@ export component MapOverlay inherits Window {
     in property <float> overlay-opacity: 0.85;
     out property <length> view-width: map.view-width;
     out property <length> view-height: map.view-height;
+    // the view is moved away from the player (shows the recenter button)
+    in property <bool> panned;
     callback drag();
     callback toggle-lock();
     callback zoom-by(float);
+    callback pan-by(length, length);
+    callback recenter();
+    callback resize(int);
     // quick search: resources ("g:" + key) and monsters ("p:" + id) of the map, shown or hidden with a tick
     in-out property <bool> search-open;
     in-out property <string> search-query;
@@ -1067,12 +1231,28 @@ export component MapOverlay inherits Window {
             interactive: false;
             wheel-zoom: false;
         }
+        // a drag pans the map, Ctrl+drag moves the window, a double click returns to the player
         if !root.locked: TouchArea {
+            property <length> last-x;
+            property <length> last-y;
+            property <bool> panning;
+            mouse-cursor: self.pressed && self.panning ? MouseCursor.grabbing : MouseCursor.grab;
             pointer-event(e) => {
                 if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
-                    root.drag();
+                    self.panning = !e.modifiers.control;
+                    self.last-x = self.mouse-x;
+                    self.last-y = self.mouse-y;
+                    if (!self.panning) { root.drag(); }
                 }
             }
+            moved => {
+                if (self.pressed && self.panning) {
+                    root.pan-by(self.mouse-x - self.last-x, self.mouse-y - self.last-y);
+                    self.last-x = self.mouse-x;
+                    self.last-y = self.mouse-y;
+                }
+            }
+            double-clicked => { root.recenter(); }
             scroll-event(e) => {
                 root.zoom-by(e.delta-y / 1px);
                 accept
@@ -1083,6 +1263,7 @@ export component MapOverlay inherits Window {
         x: parent.width - self.preferred-width - 6px;
         y: 6px;
         spacing: 4px;
+        if root.panned: IconButton { width: 26px; height: 26px; icon-size: 15px; boxed: true; icon: Icons.locate-fixed; clicked => { root.recenter(); } }
         IconButton { width: 26px; height: 26px; icon-size: 15px; boxed: true; icon: Icons.minus; clicked => { root.zoom-by(-120); } }
         IconButton { width: 26px; height: 26px; icon-size: 15px; boxed: true; icon: Icons.plus; clicked => { root.zoom-by(120); } }
         IconButton { width: 26px; height: 26px; icon-size: 15px; boxed: true; icon: Icons.lock-open; clicked => { root.toggle-lock(); } }
@@ -1112,6 +1293,7 @@ export component MapOverlay inherits Window {
                     detail: r.detail;
                     checked: r.checked;
                     dot: r.color;
+                    icon: r.icon;
                     toggled(on) => { root.toggle-item(r.key, on); }
                 }
             }
@@ -1131,6 +1313,7 @@ export component MapOverlay inherits Window {
             if (root.search-open) { root.search(root.search-query); }
         }
     }
+    if !root.locked: ResizeGrips { resize(edge) => { root.resize(edge); } }
 }
 
 // ---------------------------------------------------------------- main window
@@ -1204,6 +1387,9 @@ export component App inherits Window {
     in-out property <string> monster-query;
     in-out property <bool> show-live-mobs;
     in-out property <bool> show-cubes;
+    // game icons of the live layers (empty: the coloured dots)
+    in property <image> mob-icon;
+    in property <image> cube-icon;
     in-out property <bool> cube-sound;
     in-out property <float> cube-volume: 70;
     callback cube-sound-changed(bool);
@@ -1226,6 +1412,8 @@ export component App inherits Window {
     callback toggle-kind(string, bool);
     callback expand-kind(string);
     callback toggle-pet(string, bool);
+    callback toggle-monster(string, bool);
+    callback expand-pet(string);
     callback resource-search(string);
     callback monster-search(string);
     callback select-shown-monsters();
@@ -1400,8 +1588,6 @@ export component App inherits Window {
                                         height: 16px;
                                         SectionTitle { text: "#"; width: 16px; }
                                         SectionTitle { text: "PLAYER"; horizontal-stretch: 1; }
-                                        SectionTitle { text: "GS"; width: 48px; horizontal-alignment: right; }
-                                        SectionTitle { text: "POWER"; width: 64px; horizontal-alignment: right; }
                                         SectionTitle { text: "DAMAGE"; width: 80px; horizontal-alignment: right; }
                                         SectionTitle { text: "DPS"; width: 80px; horizontal-alignment: right; }
                                         SectionTitle { text: "SHARE"; width: 40px; horizontal-alignment: right; }
@@ -1442,26 +1628,7 @@ export component App inherits Window {
                                         ListView {
                                             for s in root.skills: VerticalLayout {
                                                 padding-bottom: 3px;
-                                                Rectangle {
-                                                    height: 26px;
-                                                    border-radius: 6px;
-                                                    clip: true;
-                                                    background: Theme.surface-raised;
-                                                    Rectangle {
-                                                        x: 0;
-                                                        width: parent.width * s.share;
-                                                        background: Theme.accent.with-alpha(0.16);
-                                                    }
-                                                    HorizontalLayout {
-                                                        padding-left: 8px;
-                                                        padding-right: 8px;
-                                                        spacing: 8px;
-                                                        Text { text: s.name; color: Theme.text; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
-                                                        Text { text: s.total; color: Theme.text; font-weight: 600; width: 64px; horizontal-alignment: right; vertical-alignment: center; }
-                                                        Text { text: s.hits; color: Theme.muted; width: 36px; horizontal-alignment: right; vertical-alignment: center; }
-                                                        Text { text: s.crit; color: Theme.muted; width: 40px; horizontal-alignment: right; vertical-alignment: center; }
-                                                    }
-                                                }
+                                                SkillBar { data: s; }
                                             }
                                         }
                                     }
@@ -1575,8 +1742,8 @@ export component App inherits Window {
                                         padding: 10px;
                                         spacing: 8px;
                                         VerticalLayout {
-                                            CheckRow { text: "Live monsters"; checked: root.show-live-mobs; dot: #e05050; toggled(on) => { root.show-live-mobs = on; root.live-mobs-changed(on); } }
-                                            CheckRow { text: "Hidden Cubes"; checked: root.show-cubes; dot: #ffd84d; toggled(on) => { root.show-cubes = on; root.cubes-changed(on); } }
+                                            CheckRow { text: "Live monsters"; checked: root.show-live-mobs; dot: #e05050; icon: root.mob-icon; toggled(on) => { root.show-live-mobs = on; root.live-mobs-changed(on); } }
+                                            CheckRow { text: "Hidden Cubes"; checked: root.show-cubes; dot: #ffd84d; icon: root.cube-icon; toggled(on) => { root.show-cubes = on; root.cubes-changed(on); } }
                                             HorizontalLayout {
                                                 spacing: 2px;
                                                 CheckRow { horizontal-stretch: 1; text: "Sound near a Hidden Cube"; checked: root.cube-sound; toggled(on) => { root.cube-sound = on; root.cube-sound-changed(on); } }
@@ -1670,6 +1837,7 @@ export component App inherits Window {
                                                             checked: r.checked;
                                                             partial: r.partial;
                                                             dot: r.color;
+                                                            icon: r.icon;
                                                             toggled(on) => { root.toggle-kind(r.key, on); }
                                                         }
                                                     }
@@ -1683,14 +1851,47 @@ export component App inherits Window {
                                                 }
                                             }
                                         }
+                                        // pets that can be farmed, each with the monsters that give it, then the other monsters
                                         if root.filter-tab == 1: ListView {
                                             vertical-stretch: 1;
-                                            for r in root.monster-rows: CheckRow {
-                                                text: r.label;
-                                                detail: r.detail;
-                                                checked: r.checked;
-                                                dot: r.checked ? r.color : transparent;
-                                                toggled(on) => { root.toggle-pet(r.key, on); }
+                                            for r in root.monster-rows: Rectangle {
+                                                height: 30px;
+                                                if r.header: HorizontalLayout {
+                                                    padding-left: 2px;
+                                                    Rectangle {
+                                                        width: 22px;
+                                                        border-radius: 6px;
+                                                        background: pet-touch.has-hover ? Theme.surface-hover : transparent;
+                                                        Icon {
+                                                            x: 3px;
+                                                            y: (parent.height - self.height) / 2;
+                                                            width: 16px;
+                                                            height: 16px;
+                                                            commands: r.expanded ? Icons.chevron-down : Icons.chevron-right;
+                                                            tint: Theme.muted;
+                                                        }
+                                                        pet-touch := TouchArea { clicked => { root.expand-pet(r.key); } }
+                                                    }
+                                                    CheckRow {
+                                                        horizontal-stretch: 1;
+                                                        text: r.label;
+                                                        detail: r.detail;
+                                                        checked: r.checked;
+                                                        partial: r.partial;
+                                                        dot: r.checked || r.partial ? r.color : transparent;
+                                                        icon: r.icon;
+                                                        toggled(on) => { root.toggle-pet(r.key, on); }
+                                                    }
+                                                }
+                                                if !r.header: CheckRow {
+                                                    indent: r.child ? 24px : 0px;
+                                                    text: r.label;
+                                                    detail: r.detail;
+                                                    checked: r.checked;
+                                                    dot: r.checked ? r.color : transparent;
+                                                    icon: r.icon;
+                                                    toggled(on) => { root.toggle-monster(r.key, on); }
+                                                }
                                             }
                                         }
                                     }
@@ -2004,16 +2205,5 @@ export component App inherits Window {
         }
     }
 
-    if !root.is-maximized: Rectangle {
-        property <length> e: 5px;
-        property <length> c: 12px;
-        TouchArea { x: c; y: 0; width: parent.width - 2 * c; height: e; mouse-cursor: n-resize; pointer-event(ev) => { if (ev.kind == PointerEventKind.down) { root.window-resize(0); } } }
-        TouchArea { x: c; y: parent.height - e; width: parent.width - 2 * c; height: e; mouse-cursor: s-resize; pointer-event(ev) => { if (ev.kind == PointerEventKind.down) { root.window-resize(1); } } }
-        TouchArea { x: parent.width - e; y: c; width: e; height: parent.height - 2 * c; mouse-cursor: e-resize; pointer-event(ev) => { if (ev.kind == PointerEventKind.down) { root.window-resize(2); } } }
-        TouchArea { x: 0; y: c; width: e; height: parent.height - 2 * c; mouse-cursor: w-resize; pointer-event(ev) => { if (ev.kind == PointerEventKind.down) { root.window-resize(3); } } }
-        TouchArea { x: parent.width - c; y: 0; width: c; height: e; mouse-cursor: ne-resize; pointer-event(ev) => { if (ev.kind == PointerEventKind.down) { root.window-resize(4); } } }
-        TouchArea { x: 0; y: 0; width: c; height: e; mouse-cursor: nw-resize; pointer-event(ev) => { if (ev.kind == PointerEventKind.down) { root.window-resize(5); } } }
-        TouchArea { x: parent.width - c; y: parent.height - c; width: c; height: c; mouse-cursor: se-resize; pointer-event(ev) => { if (ev.kind == PointerEventKind.down) { root.window-resize(6); } } }
-        TouchArea { x: 0; y: parent.height - c; width: c; height: c; mouse-cursor: sw-resize; pointer-event(ev) => { if (ev.kind == PointerEventKind.down) { root.window-resize(7); } } }
-    }
+    if !root.is-maximized: ResizeGrips { resize(edge) => { root.window-resize(edge); } }
 }

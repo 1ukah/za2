@@ -1,6 +1,7 @@
-"""Reads the spawn points out of the client's per-map files (AION2/Content/Data/Map/**/MapData.dat) and writes the ones of pet monsters.
+"""Reads the spawn points out of the client's per-map files (AION2/Content/Data/Map/**/MapData.dat) and writes the ones of every enemy
+(monsters.json from build_monsters.py) and every pet monster (pets.json).
 
-Usage:  python3 build_spawns.py <dir with the unpacked AION2/Content/Data/Map> <pets.json> <out.json>
+Usage:  python3 build_spawns.py <dir with the unpacked AION2/Content/Data/Map> <monsters.json> <pets.json> <out.json>
 
 A MapData.dat is not the table container of the other .dat files: the whole file is XOR-ed with the four bytes 25 a8 7e 91 (the same
 bytes that hide the strings in the tables). Decoded it starts with a comma separated list of numbers and then holds the unreal
@@ -52,8 +53,8 @@ def parse(path):
 
 
 def main():
-    root, pets_path, out_path = sys.argv[1:4]
-    monsters = {int(k): v for k, v in json.load(open(pets_path))["monsters"].items()}
+    root, monsters_path, pets_path, out_path = sys.argv[1:5]
+    monsters = {int(k) for k in json.load(open(monsters_path))} | {int(k) for k in json.load(open(pets_path))["monsters"]}
     maps = {}
     total = 0
     for folder, _, files in os.walk(root):
@@ -70,7 +71,7 @@ def main():
         if per_npc:
             maps[name] = per_npc
     json.dump({"maps": maps}, open(out_path, "w"), separators=(",", ":"))
-    print(f"{len(maps)} maps with pet monsters, {total} spawn points -> {out_path} ({os.path.getsize(out_path) // 1024} KB)")
+    print(f"{len(maps)} maps with monsters, {total} spawn points -> {out_path} ({os.path.getsize(out_path) // 1024} KB)")
 
 
 if __name__ == "__main__":

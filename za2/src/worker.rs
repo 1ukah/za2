@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -60,6 +60,9 @@ pub struct Row {
     pub id: i32,
     pub name: String,
     pub class: Option<&'static str>,
+    /// Gear score and combat power from the party roster: party members only.
+    pub gear_score: Option<u32>,
+    pub combat_power: Option<u64>,
     pub damage: i64,
     pub dps: Option<f64>,
     pub heal: i64,
@@ -91,8 +94,8 @@ pub struct Snapshot {
     pub position: Option<TrackedPosition>,
     pub live_mobs: Vec<LiveMob>,
     pub live_env: Vec<EnvObject>,
-    pub skills: Vec<SkillUsage>,
-    pub skills_of: i32,
+    /// Skill breakdown of each selected player (the meter's and the overlays' selections).
+    pub skills: HashMap<i32, Vec<SkillUsage>>,
     pub target: Option<(String, i64, i64)>,
     pub character: Option<String>,
     pub sessions: Arc<Vec<SessionSummary>>,
@@ -121,8 +124,7 @@ impl Default for Snapshot {
             position: None,
             live_mobs: Vec::new(),
             live_env: Vec::new(),
-            skills: Vec::new(),
-            skills_of: -1,
+            skills: HashMap::new(),
             target: None,
             character: None,
             sessions: Arc::new(Vec::new()),
@@ -137,7 +139,8 @@ pub enum WorkerCommand {
     Reset,
     OwnName(String),
     ResetOnZone(bool),
-    SelectSource(i32),
+    /// The players whose skills the snapshot carries.
+    SelectSources(Vec<i32>),
     StartRecording(PathBuf),
     StopRecording,
     RestoreMap(Option<String>, Option<(f32, f32)>),
@@ -254,7 +257,7 @@ struct Worker {
     engine: Engine,
     tracker: PositionTracker,
     snapshot: Snapshot,
-    selected: i32,
+    selected: Vec<i32>,
     replay: bool,
     recorder: Option<(PathBuf, recording::Writer)>,
     queue_dropped: Arc<AtomicU64>,
@@ -360,8 +363,7 @@ impl Worker {
         self.memory.merge(&mut s.live_mobs, now);
         s.memory_status = self.memory.describe();
         s.live_env = engine.decoder.entities.live_env(now);
-        s.skills_of = self.selected;
-        s.skills = if self.selected >= 0 { engine.combat.skill_breakdown(self.selected, false) } else { Vec::new() };
+        s.skills = self.selected.iter().map(|&id| (id, engine.combat.skill_breakdown(id, false))).collect();
         let r = &engine.reassembler;
         let d = &engine.decoder.stats;
         s.counters.segments = engine.segments;
@@ -392,7 +394,10 @@ impl Worker {
             }
             WorkerCommand::OwnName(name) => self.engine.decoder.entities.set_configured_local_name(Some(&name)),
             WorkerCommand::ResetOnZone(on) => self.engine.reset_on_zone_change = on,
-            WorkerCommand::SelectSource(id) => self.selected = id,
+            WorkerCommand::SelectSources(ids) => {
+                self.selected = ids;
+                self.dirty = true;
+            }
             WorkerCommand::StartRecording(path) => {
                 if let Some(dir) = path.parent() {
                     let _ = std::fs::create_dir_all(dir);
@@ -425,7 +430,7 @@ fn run(source: Source, own_name: String, reset_on_zone: bool, shared: Arc<Shared
         engine,
         tracker: PositionTracker::new(),
         snapshot: Snapshot::default(),
-        selected: -1,
+        selected: Vec::new(),
         replay: matches!(source, Source::Replay { .. }),
         recorder: None,
         queue_dropped: queue_dropped.clone(),
@@ -593,11 +598,14 @@ fn player_rows(log: &CombatLog, entities: &EntityDirectory) -> Vec<Row> {
         }
         let stats = log.damage_by_source().get(&id).cloned().unwrap_or_default();
         let name = entities.name_for(id).unwrap_or_else(|| format!("Player #{id}"));
+        let party_stats = entities.party_stats(&name);
         rows.push(Row {
             id,
             in_group: Some(id) == local || party.contains(&name) || entities.local_character().is_some_and(|c| c.name == name),
             name,
             class: entities.class_of(id),
+            gear_score: party_stats.map(|p| p.gear_score),
+            combat_power: party_stats.and_then(|p| p.combat_power),
             damage: stats.sum,
             dps: stats.rate(),
             heal: healing.get(&id).copied().unwrap_or(0),

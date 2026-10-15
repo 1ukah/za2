@@ -3,7 +3,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 
 use za2_core::catalog::gather::{self, GatherItem};
 use za2_core::catalog::maps::MapInfo;
-use za2_core::catalog::pets;
+use za2_core::catalog::{bosses, map_icons, monsters, pets};
 use za2_core::entities::{EnvObject, LiveMob};
 use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 
@@ -256,7 +256,14 @@ pub struct Marker {
     pub live: bool,
     /// 1 above the player, -1 below, 0 about level or unknown.
     pub level: i32,
+    /// Game icon (relative to the assets folder) drawn instead of the dot, in a ring of `color`.
+    pub icon: Option<&'static str>,
 }
+
+/// Live things with an icon are drawn this big, static places from this zoom on (radius in metres).
+const LIVE_ICON_SIZE: f32 = 22.0;
+const STATIC_ICON_SIZE: f32 = 16.0;
+const STATIC_ICON_RADIUS: f64 = 500.0;
 
 /// Whether something at height `z` is clearly above (1) or below (-1) the player.
 pub fn level_of(z: f32, player_z: Option<f32>) -> i32 {
@@ -294,8 +301,53 @@ pub struct StaticLayer {
     pub gather: Vec<(&'static GatherItem, f32, f32, (u8, u8, u8))>,
     /// Every Hidden Cube place of the map with its group colour, for colouring live cubes.
     cube_places: Vec<(f32, f32, (u8, u8, u8))>,
-    pub pets: Vec<(i32, f32, f32)>,
-    pub pet_colors: HashMap<i32, (u8, u8, u8)>,
+    /// Spawn places of the selected monsters.
+    pub monsters: Vec<(i32, f32, f32)>,
+    /// Colour of each selected monster: one per ticked pet (its monsters share it), one per monster ticked alone.
+    pub monster_colors: HashMap<i32, (u8, u8, u8)>,
+}
+
+/// The selected monsters of a map with their colour: the monsters of each ticked pet in the pet's colour, then each
+/// monster ticked on its own. Colours go round `PET_PALETTE` in that order, so the lists and the map agree.
+pub fn monster_colors(table: &str, pet_ids: &BTreeSet<i32>, monster_ids: &BTreeSet<i32>) -> Vec<(i32, (u8, u8, u8))> {
+    let on_map: HashSet<i32> = monsters::on_map(table).into_iter().collect();
+    let mut out: Vec<(i32, (u8, u8, u8))> = Vec::new();
+    let mut group = 0;
+    for &pet in pet_ids {
+        let npcs: Vec<i32> = pets::npcs_of_pet(pet).iter().copied().filter(|n| on_map.contains(n)).collect();
+        if npcs.is_empty() {
+            continue;
+        }
+        let color = PET_PALETTE[group % PET_PALETTE.len()];
+        group += 1;
+        for npc in npcs {
+            if !out.iter().any(|o| o.0 == npc) {
+                out.push((npc, color));
+            }
+        }
+    }
+    for &npc in monster_ids {
+        if on_map.contains(&npc) && !out.iter().any(|o| o.0 == npc) {
+            out.push((npc, PET_PALETTE[group % PET_PALETTE.len()]));
+            group += 1;
+        }
+    }
+    out
+}
+
+/// The icon of a monster: its portrait, else the portrait of its pet, else the game's minimap marker of its rank.
+pub fn monster_icon(npc: i32) -> Option<&'static str> {
+    monsters::info(npc)
+        .and_then(|m| m.icon.as_deref())
+        .or_else(|| pets::pets_of_npc(npc).iter().find_map(|&p| pets::icon_of(p)))
+        .or_else(|| rank_marker(npc))
+}
+
+/// The game's minimap marker of a monster's rank (normal, elite, boss).
+pub fn rank_marker(npc: i32) -> Option<&'static str> {
+    let boss = monsters::is_boss_rank(npc) || bosses::find(npc).is_some();
+    let elite = monsters::info(npc).is_some_and(|m| m.rank == "Elite");
+    map_icons::named(if boss { "boss" } else if elite { "elite" } else { "mob" })
 }
 
 impl StaticLayer {
@@ -309,16 +361,16 @@ impl StaticLayer {
             .map(|(_, color)| color)
     }
 
-    pub fn update(&mut self, map: Option<&MapInfo>, gather_keys: &BTreeSet<String>, pet_ids: &BTreeSet<i32>, faction: Option<&str>) {
-        let key = format!("{}|{:?}|{:?}|{faction:?}", map.map_or("-", |m| m.key.as_str()), gather_keys, pet_ids);
+    pub fn update(&mut self, map: Option<&MapInfo>, gather_keys: &BTreeSet<String>, pet_ids: &BTreeSet<i32>, monster_ids: &BTreeSet<i32>, faction: Option<&str>) {
+        let key = format!("{}|{:?}|{:?}|{:?}|{faction:?}", map.map_or("-", |m| m.key.as_str()), gather_keys, pet_ids, monster_ids);
         if key == self.key {
             return;
         }
         self.key = key;
         self.gather.clear();
         self.cube_places.clear();
-        self.pets.clear();
-        self.pet_colors.clear();
+        self.monsters.clear();
+        self.monster_colors.clear();
         let Some(map) = map else { return };
         for (i, group) in gather::cube_groups(&map.table).iter().enumerate() {
             let color = cube_group_color(i);
@@ -333,12 +385,9 @@ impl StaticLayer {
                 self.gather.push((item, x, y, gather_color(&item.kind)));
             }
         }
-        let chosen: HashSet<i32> = pet_ids.iter().copied().collect();
-        self.pets = pets::points_of(&map.table, &chosen);
-        let mut on_map: Vec<i32> = self.pets.iter().map(|p| p.0).collect::<HashSet<_>>().into_iter().collect();
-        on_map.sort_unstable();
-        for (i, id) in on_map.into_iter().enumerate() {
-            self.pet_colors.insert(id, PET_PALETTE[i % PET_PALETTE.len()]);
+        for (npc, color) in monster_colors(&map.table, pet_ids, monster_ids) {
+            self.monster_colors.insert(npc, color);
+            self.monsters.extend(monsters::spawns_of(&map.table, npc).iter().map(|&(x, y)| (npc, x, y)));
         }
     }
 }
@@ -351,7 +400,6 @@ pub struct LiveInputs<'a> {
     pub mobs: &'a [LiveMob],
     pub show_live_mobs: bool,
     pub show_cubes: bool,
-    pub pet_ids: &'a BTreeSet<i32>,
 }
 
 pub fn markers(map: &MapInfo, view: &View, layer: &StaticLayer, live: &LiveInputs, out: &mut Vec<Marker>) {
@@ -365,6 +413,20 @@ pub fn markers(map: &MapInfo, view: &View, layer: &StaticLayer, live: &LiveInput
     };
     let live_env_matches = |key: &str, x: f32, y: f32| live.env.iter().any(|e| e.key == key && (e.x - x).abs() < 300.0 && (e.y - y).abs() < 300.0);
     let static_size = if view.radius_metres > 1500.0 { 4.0 } else if view.radius_metres > 500.0 { 6.0 } else { 8.0 };
+    let static_icons = view.radius_metres <= STATIC_ICON_RADIUS;
+    let static_marker = |x: f32, y: f32, color, icon: Option<&'static str>| match icon.filter(|_| static_icons) {
+        Some(icon) => Marker { x, y, color, size: STATIC_ICON_SIZE, live: false, level: 0, icon: Some(icon) },
+        None => Marker { x, y, color, size: static_size, live: false, level: 0, icon: None },
+    };
+    let live_marker = |x: f32, y: f32, color, size: f32, level: i32, icon: Option<&'static str>| Marker {
+        x,
+        y,
+        color,
+        size: if icon.is_some() { LIVE_ICON_SIZE } else { size },
+        live: true,
+        level,
+        icon,
+    };
 
     let push = |m: Marker, out: &mut Vec<Marker>| {
         if out.len() < MAX_MARKERS {
@@ -373,10 +435,10 @@ pub fn markers(map: &MapInfo, view: &View, layer: &StaticLayer, live: &LiveInput
         }
     };
 
-    for &(id, x, y) in &layer.pets {
+    for &(npc, x, y) in &layer.monsters {
         if in_view(x, y) {
-            let color = layer.pet_colors.get(&id).copied().unwrap_or((255, 255, 255));
-            push(Marker { x, y, color, size: static_size, live: false, level: 0 }, out);
+            let color = layer.monster_colors.get(&npc).copied().unwrap_or((255, 255, 255));
+            push(static_marker(x, y, color, monster_icon(npc)), out);
         }
     }
 
@@ -387,7 +449,7 @@ pub fn markers(map: &MapInfo, view: &View, layer: &StaticLayer, live: &LiveInput
         if near_player(x, y) && !live_env_matches(&item.key, x, y) {
             continue;
         }
-        push(Marker { x, y, color, size: static_size, live: false, level: 0 }, out);
+        push(static_marker(x, y, color, map_icons::gather(&item.kind)), out);
     }
 
     if live.known {
@@ -396,20 +458,21 @@ pub fn markers(map: &MapInfo, view: &View, layer: &StaticLayer, live: &LiveInput
             if wanted && in_view(e.x, e.y) {
                 let size = if e.kind == "Cube" { 14.0 } else { 11.0 };
                 let color = if e.kind == "Cube" { layer.cube_color_near(e.x, e.y).unwrap_or_else(|| gather_color("Cube")) } else { gather_color(&e.kind) };
-                push(Marker { x: e.x, y: e.y, color, size, live: true, level: level_of(e.z, live.player_z) }, out);
+                push(live_marker(e.x, e.y, color, size, level_of(e.z, live.player_z), map_icons::gather(&e.kind)), out);
             }
         }
         for &LiveMob { npc, x, y, .. } in live.mobs {
             if !in_view(x, y) {
                 continue;
             }
-            let pet = pets::pets_of_npc(npc).iter().find(|p| live.pet_ids.contains(p));
-            match pet {
-                Some(p) => {
-                    let color = layer.pet_colors.get(p).copied().unwrap_or((255, 255, 255));
-                    push(Marker { x, y, color, size: 13.0, live: true, level: 0 }, out);
+            match layer.monster_colors.get(&npc) {
+                Some(&color) => push(live_marker(x, y, color, 13.0, 0, monster_icon(npc)), out),
+                None if live.show_live_mobs => {
+                    // the other monsters keep the game's small minimap marker, so the selected ones stand out
+                    let icon = rank_marker(npc);
+                    let marker = live_marker(x, y, (0xE0, 0x50, 0x50), 7.0, 0, icon);
+                    push(Marker { size: if icon.is_some() { STATIC_ICON_SIZE } else { 7.0 }, ..marker }, out);
                 }
-                None if live.show_live_mobs => push(Marker { x, y, color: (0xE0, 0x50, 0x50), size: 7.0, live: true, level: 0 }, out),
                 None => {}
             }
         }

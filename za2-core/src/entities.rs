@@ -132,6 +132,13 @@ pub struct Position {
 const PARTY_MEMORY: Micros = 90 * SECOND;
 const MIN_SKILLS_OF_A_PLAYER: usize = 4;
 
+/// Gear score and combat power of a party member, from the party roster frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PartyStats {
+    pub gear_score: u32,
+    pub combat_power: Option<u64>,
+}
+
 #[derive(Default)]
 pub struct EntityDirectory {
     names: HashMap<i32, String>,
@@ -163,6 +170,7 @@ pub struct EntityDirectory {
     party_seen: HashMap<String, Micros>,
     last_party_frame: Micros,
     party_classes: HashMap<String, &'static str>,
+    party_stats: HashMap<String, PartyStats>,
     party_targets: HashSet<i32>,
     fighting_alongside: HashSet<i32>,
     skills_seen: HashMap<i32, HashSet<i32>>,
@@ -477,6 +485,15 @@ impl EntityDirectory {
 
     pub fn note_party_class(&mut self, name: &str, class: &'static str) {
         self.party_classes.insert(name.to_string(), class);
+    }
+
+    pub fn note_party_stats(&mut self, name: &str, stats: PartyStats) {
+        self.party_stats.insert(name.to_string(), stats);
+    }
+
+    /// Gear score and combat power of a party member, from the last roster that named them.
+    pub fn party_stats(&self, name: &str) -> Option<PartyStats> {
+        self.party_stats.get(name).copied()
     }
 
     pub fn note_non_player_name(&mut self, name: &str) {

@@ -12,11 +12,13 @@ pub struct OverlayConfig {
     pub metric: u8,
     pub range: u8,
     pub scope: u8,
+    /// Window size (logical pixels) the user gave the overlay; None: the default size.
+    pub size: Option<(f32, f32)>,
 }
 
 impl Default for OverlayConfig {
     fn default() -> Self {
-        OverlayConfig { id: 1, enabled: true, metric: 0, range: 0, scope: 0 }
+        OverlayConfig { id: 1, enabled: true, metric: 0, range: 0, scope: 0, size: None }
     }
 }
 
@@ -27,7 +29,10 @@ pub struct Settings {
     pub reset_on_zone_change: bool,
     pub scope: i32,
     pub gather_items: BTreeSet<String>,
+    /// Pets to farm: all monsters that give them are marked.
     pub pets: BTreeSet<i32>,
+    /// Monsters marked on their own (npc ids).
+    pub monsters: BTreeSet<i32>,
     pub show_live_mobs: bool,
     pub show_cubes: bool,
     pub map_radius_metres: f64,
@@ -41,6 +46,8 @@ pub struct Settings {
     /// The meter table shows the current fight (0) or the total (1).
     pub meter_range: u8,
     pub map_overlay: bool,
+    /// Window size (logical pixels) of the map overlay; None: the default size.
+    pub map_overlay_size: Option<(f32, f32)>,
     pub overlays_locked: bool,
     pub overlay_opacity: f32,
     pub capture_device: Option<String>,
@@ -57,6 +64,7 @@ impl Default for Settings {
             scope: 0,
             gather_items: BTreeSet::new(),
             pets: BTreeSet::new(),
+            monsters: BTreeSet::new(),
             show_live_mobs: true,
             show_cubes: true,
             map_radius_metres: 250.0,
@@ -68,6 +76,7 @@ impl Default for Settings {
             overlays: vec![OverlayConfig::default()],
             meter_range: 0,
             map_overlay: false,
+            map_overlay_size: None,
             overlays_locked: false,
             overlay_opacity: 0.85,
             capture_device: None,

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use crate::catalog::{bosses, gather, skills, zones};
-use crate::entities::{CharacterInfo, EntityDirectory};
+use crate::entities::{CharacterInfo, EntityDirectory, PartyStats};
 use crate::lz4;
 use crate::protocol::{OpcodeFamily, Protocol};
 use crate::segment::{Micros, SECOND};
@@ -1076,6 +1076,9 @@ impl FrameDecoder {
                 if let Some(class) = skills::class_from_roster_code(frame[after] as i32) {
                     self.entities.note_party_class(&name, class);
                 }
+                if let Some(stats) = roster_stats(frame, i, after) {
+                    self.entities.note_party_stats(&name, stats);
+                }
             }
             members.push(name);
             i = after + 8;
@@ -1083,6 +1086,59 @@ impl FrameDecoder {
         if party_frame && !members.is_empty() {
             self.entities.note_party(&members, timestamp);
         }
+    }
+}
+
+/// Gear score and combat power of the party roster member whose name length byte is at `name_at` and whose
+/// class field starts at `after`. Layout (as A2Tools-DPS-Meter reads it): `dbid u64 | name | class u32 | level u32 |
+/// gear score u32 | world id u16, u16 | tag u8 | combat power u64`. The bytes between the gear score and the world id
+/// vary in width, so the world id (the top u16 of `dbid`, right before the name) is searched for as the anchor.
+fn roster_stats(frame: &[u8], name_at: usize, after: usize) -> Option<PartyStats> {
+    let gear_at = after + 8;
+    if name_at < 8 || gear_at + 4 > frame.len() {
+        return None;
+    }
+    let world = u16_at(frame, name_at - 2);
+    let gear_score = u32_at(frame, gear_at);
+    if world == 0 || gear_score > 1_000_000 {
+        return None;
+    }
+    let start = gear_at + 4;
+    let anchor = (start..start + 10).find(|&k| k + 2 <= frame.len() && u16_at(frame, k) == world)?;
+    let power_at = anchor + 5;
+    if power_at + 8 > frame.len() {
+        return Some(PartyStats { gear_score, combat_power: None });
+    }
+    let power = i64_at(frame, power_at);
+    let combat_power = (0..=100_000_000).contains(&power).then_some(power as u64);
+    Some(PartyStats { gear_score, combat_power })
+}
+
+#[cfg(test)]
+mod roster_tests {
+    use super::*;
+
+    fn hex(text: &str) -> Vec<u8> {
+        text.split_whitespace().map(|b| u8::from_str_radix(b, 16).unwrap()).collect()
+    }
+
+    /// Slots 1 and 5 filled, 2-4 vacant (A2Tools-DPS-Meter test data, from a 2026-08-15 capture).
+    #[test]
+    fn roster_reads_gear_score_and_combat_power() {
+        let frame = hex(&[
+            "02 97 a5 f9 08 00 0b 38 35 30 4b 20 e8 bf 9e e5 88 b7 05 63 28 09 00 00 03 85 4b 01 00 00 00 f6 03 1f 02 00 05",
+            "0c 01 85 4b 01 00 00 00 f6 03 0f e4 b9 9d e5 b7 9e e4 be 9d e7 84 b6 e5 9c a8 06 00 00 00 32 00 00 00 07 17 00 00 f6 03 f6 03 04 38 39 0d 00 00 00 00 00 00 01 01",
+            "00 02 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 04 00 00 00 00 00 00 00 00 00 00 00 00",
+            "00 03 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 04 00 00 00 00 00 00 00 00 00 00 00 00",
+            "00 04 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 04 00 00 00 00 00 00 00 00 00 00 00 00",
+            "0e 05 62 64 01 00 00 00 f6 03 02 4d 37 0e 00 00 00 32 00 00 00 5e 16 00 00 f6 03 f6 03 04 6a 03 0d 00 00 00 00 00 00 01 01",
+            "02 0e 00 36",
+        ]
+        .join(" "));
+        let mut decoder = FrameDecoder::new(Arc::new(Protocol::load()));
+        decoder.decode_roster(&frame, 0);
+        assert_eq!(decoder.entities.party_stats("九州依然在"), Some(PartyStats { gear_score: 5895, combat_power: Some(866_616) }));
+        assert_eq!(decoder.entities.party_stats("M7"), Some(PartyStats { gear_score: 5726, combat_power: Some(852_842) }));
     }
 }
 

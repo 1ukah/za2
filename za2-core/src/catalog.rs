@@ -67,6 +67,25 @@ pub mod skills {
         table.get(&(skill_id / 10000 * 10000)).cloned().unwrap_or_else(|| skill_id.to_string())
     }
 
+    fn icon_tokens() -> &'static HashMap<i32, String> {
+        static TOKENS: OnceLock<HashMap<i32, String>> = OnceLock::new();
+        TOKENS.get_or_init(|| {
+            object_entries(read_json("skills/skill_icon_tokens.json").as_ref())
+                .filter_map(|(k, v)| {
+                    let token = v.as_str()?;
+                    Some((k.parse().ok()?, token.rsplit('/').next().unwrap_or(token).to_string()))
+                })
+                .collect()
+        })
+    }
+
+    /// The icon of a skill, relative to the assets folder (`skills/icons/ICON_SO_SKILL_025.png`). Keyed by the first four
+    /// digits of the id (skill id / 10000), so the attacks of a spirit show the icon of its summon.
+    pub fn icon_of(skill_id: i32) -> Option<String> {
+        let token = icon_tokens().get(&(skill_id / 10000))?;
+        Some(format!("skills/icons/{token}.png"))
+    }
+
     pub fn english_name(skill_id: i32) -> Option<&'static str> {
         let table = names();
         table.get(&skill_id).or_else(|| table.get(&(skill_id / 10000 * 10000))).map(String::as_str)
@@ -380,36 +399,69 @@ pub mod gather {
     }
 }
 
-pub mod pets {
+/// Map icons extracted from the game (`map/icons/index.json`, see `Tools/aion2-icons/build_map_icons.py`):
+/// `{"gather": {"Ore": "map/icons/ore.png", ...}, "cube": ..., "mob": ..., "boss": ...}` with paths relative to the
+/// assets folder. Without the file every lookup is None and the map draws dots.
+pub mod map_icons {
     use super::*;
 
-    pub const TOP_LEVEL: i32 = 3;
+    struct Index {
+        gather: HashMap<String, String>,
+        named: HashMap<String, String>,
+    }
 
-    pub struct Pets {
-        pub names: HashMap<i32, HashMap<String, String>>,
-        pets_of_npc: HashMap<i32, Vec<i32>>,
+    fn index() -> &'static Index {
+        static INDEX: OnceLock<Index> = OnceLock::new();
+        INDEX.get_or_init(|| {
+            let doc = read_json("map/icons/index.json");
+            let existing = |v: &Value| v.as_str().filter(|f| crate::assets::path(f).is_file()).map(str::to_string);
+            let gather = object_entries(doc.as_ref().and_then(|d| d.get("gather"))).filter_map(|(k, v)| Some((k.clone(), existing(v)?))).collect();
+            let named = object_entries(doc.as_ref()).filter(|(k, _)| k.as_str() != "gather").filter_map(|(k, v)| Some((k.clone(), existing(v)?))).collect();
+            Index { gather, named }
+        })
+    }
+
+    /// The icon of a kind of gathering place ("Ore", "Herb", ..., "Cube").
+    pub fn gather(kind: &str) -> Option<&'static str> {
+        let index = index();
+        index.gather.get(kind).or_else(|| (kind == "Cube").then(|| index.named.get("cube")).flatten()).map(String::as_str)
+    }
+
+    /// "cube", "mob" or "boss".
+    pub fn named(name: &str) -> Option<&'static str> {
+        index().named.get(name).map(String::as_str)
+    }
+}
+
+/// The enemies of the game (`npcs/monsters.json`, build_monsters.py) and where they spawn on each map (`npcs/spawns.json`,
+/// build_spawns.py; the spawns of pet monsters are in it too).
+pub mod monsters {
+    use super::*;
+
+    pub struct Monster {
+        /// "Normal", "Elite", "Hero" or "Legend".
+        pub rank: String,
+        /// Portrait, relative to the assets folder.
+        pub icon: Option<String>,
+    }
+
+    struct Data {
+        info: HashMap<i32, Monster>,
         spawns: HashMap<String, HashMap<i32, Vec<(f32, f32)>>>,
     }
 
-    pub fn data() -> &'static Pets {
-        static DATA: OnceLock<Pets> = OnceLock::new();
+    fn data() -> &'static Data {
+        static DATA: OnceLock<Data> = OnceLock::new();
         DATA.get_or_init(|| {
-            let doc = read_json("pets/pets.json");
-            let names = object_entries(doc.as_ref().and_then(|d| d.get("pets")))
-                .filter_map(|(k, v)| Some((k.parse().ok()?, names_of(v))))
+            let info = object_entries(read_json("npcs/monsters.json").as_ref())
+                .filter_map(|(k, v)| {
+                    let rank = v.get("rank").and_then(Value::as_str).unwrap_or("Normal").to_string();
+                    let icon = v.get("icon").and_then(Value::as_str).filter(|f| crate::assets::path(f).is_file()).map(str::to_string);
+                    Some((k.parse().ok()?, Monster { rank, icon }))
+                })
                 .collect();
-            let mut pets_of_npc: HashMap<i32, Vec<i32>> = HashMap::new();
-            for (k, v) in object_entries(doc.as_ref().and_then(|d| d.get("monsters"))) {
-                let Ok(npc) = k.parse::<i32>() else { continue };
-                let ids: Vec<i32> = match v {
-                    Value::Array(a) => a.iter().filter_map(Value::as_i64).map(|i| i as i32).collect(),
-                    other => other.as_i64().map(|i| vec![i as i32]).unwrap_or_default(),
-                };
-                pets_of_npc.entry(npc).or_default().extend(ids);
-            }
-
-            let spawn_doc = read_json("pets/spawns.json");
-            let spawns = object_entries(spawn_doc.as_ref().and_then(|d| d.get("maps")))
+            let doc = read_json("npcs/spawns.json");
+            let spawns = object_entries(doc.as_ref().and_then(|d| d.get("maps")))
                 .map(|(table, npcs)| {
                     let per_npc = object_entries(Some(npcs))
                         .filter_map(|(npc, points)| {
@@ -424,7 +476,81 @@ pub mod pets {
                     (table.clone(), per_npc)
                 })
                 .collect();
-            Pets { names, pets_of_npc, spawns }
+            Data { info, spawns }
+        })
+    }
+
+    pub fn info(npc_id: i32) -> Option<&'static Monster> {
+        data().info.get(&npc_id)
+    }
+
+    /// Bosses: Hero and Legend monsters.
+    pub fn is_boss_rank(npc_id: i32) -> bool {
+        info(npc_id).is_some_and(|m| m.rank == "Hero" || m.rank == "Legend")
+    }
+
+    pub fn spawn_table(table: &str) -> Option<&'static HashMap<i32, Vec<(f32, f32)>>> {
+        data().spawns.get(table)
+    }
+
+    pub fn spawns_of(table: &str, npc_id: i32) -> &'static [(f32, f32)] {
+        spawn_table(table).and_then(|t| t.get(&npc_id)).map_or(&[], Vec::as_slice)
+    }
+
+    /// The enemies that spawn on a map, by id.
+    pub fn on_map(table: &str) -> Vec<i32> {
+        let mut ids: Vec<i32> = spawn_table(table).into_iter().flat_map(|t| t.keys().copied()).filter(|id| info(*id).is_some()).collect();
+        ids.sort_unstable();
+        ids
+    }
+}
+
+pub mod pets {
+    use super::*;
+
+    pub const TOP_LEVEL: i32 = 3;
+
+    pub struct Pets {
+        pub names: HashMap<i32, HashMap<String, String>>,
+        /// Icon of each pet that has one (`pets/icons/<key>.png`).
+        icons: HashMap<i32, String>,
+        pets_of_npc: HashMap<i32, Vec<i32>>,
+        npcs_of_pet: HashMap<i32, Vec<i32>>,
+    }
+
+    pub fn data() -> &'static Pets {
+        static DATA: OnceLock<Pets> = OnceLock::new();
+        DATA.get_or_init(|| {
+            let doc = read_json("pets/pets.json");
+            let names = object_entries(doc.as_ref().and_then(|d| d.get("pets")))
+                .filter_map(|(k, v)| Some((k.parse().ok()?, names_of(v))))
+                .collect();
+            let icons = object_entries(doc.as_ref().and_then(|d| d.get("pets")))
+                .filter_map(|(k, v)| {
+                    let file = format!("pets/icons/{}.png", v.get("key")?.as_str()?);
+                    crate::assets::path(&file).is_file().then(|| Some((k.parse().ok()?, file)))?
+                })
+                .collect();
+            let mut pets_of_npc: HashMap<i32, Vec<i32>> = HashMap::new();
+            for (k, v) in object_entries(doc.as_ref().and_then(|d| d.get("monsters"))) {
+                let Ok(npc) = k.parse::<i32>() else { continue };
+                let ids: Vec<i32> = match v {
+                    Value::Array(a) => a.iter().filter_map(Value::as_i64).map(|i| i as i32).collect(),
+                    other => other.as_i64().map(|i| vec![i as i32]).unwrap_or_default(),
+                };
+                pets_of_npc.entry(npc).or_default().extend(ids);
+            }
+
+            let mut npcs_of_pet: HashMap<i32, Vec<i32>> = HashMap::new();
+            for (&npc, pets) in &pets_of_npc {
+                for &pet in pets {
+                    npcs_of_pet.entry(pet).or_default().push(npc);
+                }
+            }
+            for npcs in npcs_of_pet.values_mut() {
+                npcs.sort_unstable();
+            }
+            Pets { names, icons, pets_of_npc, npcs_of_pet }
         })
     }
 
@@ -432,12 +558,22 @@ pub mod pets {
         data().pets_of_npc.get(&npc_id).map_or(&[], Vec::as_slice)
     }
 
+    /// The pet's icon, relative to the assets folder; None when it was not extracted.
+    pub fn icon_of(pet_id: i32) -> Option<&'static str> {
+        data().icons.get(&pet_id).map(String::as_str)
+    }
+
     pub fn pet_name(pet_id: i32, language: &str) -> Option<&'static str> {
         data().names.get(&pet_id).and_then(|n| localized(n, language))
     }
 
+    /// The monsters whose souls give the pet.
+    pub fn npcs_of_pet(pet_id: i32) -> &'static [i32] {
+        data().npcs_of_pet.get(&pet_id).map_or(&[], Vec::as_slice)
+    }
+
     pub fn spawn_table(table: &str) -> Option<&'static HashMap<i32, Vec<(f32, f32)>>> {
-        data().spawns.get(table)
+        super::monsters::spawn_table(table)
     }
 
     pub fn points_of(table: &str, pets: &HashSet<i32>) -> Vec<(i32, f32, f32)> {
@@ -564,5 +700,28 @@ pub mod maps {
             }
         }
         best.map(|b| &all()[b.0])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::skills;
+
+    /// Poison Blood Gatherer (Spirit Isle, Altgard) was missing from the lists: only pet monsters had spawn data.
+    #[test]
+    fn every_enemy_of_a_map_has_its_spawns() {
+        let altgard = "World/World_D/World_D_A";
+        assert!(super::monsters::info(2400746).is_some(), "Poison Blood Gatherer is an enemy");
+        assert!(!super::monsters::spawns_of(altgard, 2400746).is_empty());
+        assert!(super::monsters::on_map(altgard).len() > 300, "all enemies, not only pet monsters");
+        assert!(super::pets::npcs_of_pet(1195).contains(&2400746), "it gives the Dracuni Herbalist");
+    }
+
+    #[test]
+    fn skill_icons_by_first_four_digits() {
+        assert_eq!(skills::icon_of(10010000).as_deref(), Some("skills/icons/ICON_CO_SKILL_004.png"));
+        // a token with a texture path keeps only its last segment
+        assert_eq!(skills::icon_of(30000001).as_deref(), Some("skills/icons/Icon_Item_Usable_Godstone_WP_r_012.png"));
+        assert_eq!(skills::icon_of(1), None);
     }
 }

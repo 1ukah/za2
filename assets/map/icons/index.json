@@ -1,0 +1,16 @@
+{
+ "boss": "map/icons/boss.png",
+ "cube": "map/icons/cube.png",
+ "elite": "map/icons/elite.png",
+ "gather": {
+  "Cotton": "map/icons/cotton.png",
+  "Food": "map/icons/food.png",
+  "Fragment": "map/icons/fragment.png",
+  "Gemstone": "map/icons/gemstone.png",
+  "Herb": "map/icons/herb.png",
+  "Od": "map/icons/od.png",
+  "Ore": "map/icons/ore.png",
+  "Wood": "map/icons/wood.png"
+ },
+ "mob": "map/icons/mob.png"
+}

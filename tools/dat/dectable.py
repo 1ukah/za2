@@ -22,14 +22,15 @@ else:
         raise ValueError(f"{name}: unknown container {et} / {et2}")
     key = dat.keys[seed]
     nonce = blake3(key + b"nonc")[:8]
-    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
     import array
+    import subprocess
     n = (size + 15) // 16
     n0 = struct.unpack("<Q", nonce)[0]
     ctr = array.array("Q")
     for i in range(n):
         ctr.append(n0); ctr.append(i)
-    ks = Cipher(algorithms.AES(key), modes.ECB()).encryptor().update(ctr.tobytes())[:size]
+    ks = subprocess.run(["openssl", "enc", "-aes-256-ecb", "-e", "-K", key.hex(), "-nopad"],
+                        input=ctr.tobytes(), capture_output=True, check=True).stdout[:size]
     body = (int.from_bytes(d[12:], "little") ^ int.from_bytes(ks, "little")).to_bytes(size, "little")
 open(sys.argv[3], "wb").write(body)
 print(name, "ok", len(body))

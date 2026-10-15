@@ -1,11 +1,13 @@
 mod control;
 mod desktop;
+mod icons;
 mod map;
 mod memory;
 mod settings;
 mod worker;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
@@ -13,7 +15,7 @@ use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use za2_core::catalog::{gather, maps, pets};
+use za2_core::catalog::{gather, map_icons, maps, pets};
 use za2_core::catalog::maps::MapInfo;
 use za2_core::entities::PositionSource;
 use za2_core::position::PositionState;
@@ -181,7 +183,53 @@ struct OverlayWindow {
     id: u32,
     window: MeterOverlay,
     rows: Rc<VecModel<OverlayRow>>,
+    skills: Rc<VecModel<SkillRow>>,
     shown: bool,
+}
+
+/// The players whose skills are shown: the meter's selection and each overlay's. The worker computes the skill
+/// breakdown of all of them.
+#[derive(Default)]
+struct Selections {
+    meter: Cell<i32>,
+    overlays: RefCell<HashMap<u32, i32>>,
+}
+
+impl Selections {
+    fn new() -> Selections {
+        Selections { meter: Cell::new(-1), overlays: RefCell::new(HashMap::new()) }
+    }
+
+    fn of_overlay(&self, id: u32) -> i32 {
+        self.overlays.borrow().get(&id).copied().unwrap_or(-1)
+    }
+
+    fn send(&self, commands: &SyncSender<WorkerCommand>) {
+        let mut ids: Vec<i32> = self.overlays.borrow().values().copied().chain([self.meter.get()]).filter(|&id| id >= 0).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let _ = commands.send(WorkerCommand::SelectSources(ids));
+    }
+}
+
+fn resize_direction(edge: i32) -> winit::window::ResizeDirection {
+    use winit::window::ResizeDirection as D;
+    match edge {
+        0 => D::North,
+        1 => D::South,
+        2 => D::East,
+        3 => D::West,
+        4 => D::NorthEast,
+        5 => D::NorthWest,
+        6 => D::SouthEast,
+        _ => D::SouthWest,
+    }
+}
+
+/// The logical size of a window, rounded.
+fn logical_size(window: &slint::Window) -> (f32, f32) {
+    let size = window.size().to_logical(window.scale_factor());
+    (size.width.round(), size.height.round())
 }
 
 /// Opens, closes and configures the overlay windows to match the settings.
@@ -200,17 +248,30 @@ fn sync_overlays(app: &App, ui: &mut Ui) {
         }
         let window = MeterOverlay::new().expect("cannot create an overlay");
         let rows = Rc::new(VecModel::default());
+        let skills = Rc::new(VecModel::default());
         window.set_rows(ModelRc::from(rows.clone()));
+        window.set_skills(ModelRc::from(skills.clone()));
         window.set_overlay_title(format!("za2 meter overlay {}", cfg.id).into());
+        if let Some((w, h)) = cfg.size {
+            window.window().set_size(slint::LogicalSize::new(w, h));
+        }
         let weak = window.as_weak();
         window.on_drag(move || move_window(&weak.unwrap()));
+        let weak = window.as_weak();
+        window.on_resize(move |edge| resize_window(&weak.unwrap(), resize_direction(edge)));
+        let (selections, commands, weak, id) = (ui.selections.clone(), ui.commands.clone(), window.as_weak(), cfg.id);
+        window.on_select(move |player| {
+            selections.overlays.borrow_mut().insert(id, player);
+            selections.send(&commands);
+            weak.unwrap().set_selected_id(player);
+        });
         let app_weak = app.as_weak();
         window.on_toggle_lock(move || {
             let app = app_weak.unwrap();
             app.set_overlays_locked(true);
             app.invoke_lock_changed(true);
         });
-        ui.overlays.push(OverlayWindow { id: cfg.id, window, rows, shown: false });
+        ui.overlays.push(OverlayWindow { id: cfg.id, window, rows, skills, shown: false });
     }
     let (locked, opacity, all_on) = (ui.settings.overlays_locked, ui.settings.overlay_opacity, ui.settings.meter_overlay);
     for o in &mut ui.overlays {
@@ -259,14 +320,14 @@ fn apply_overlay(o: &OverlayWindow, cfg: &settings::OverlayConfig, ui: &Ui) {
     let top = list.first().map_or(1, |r| value(r).max(1));
     let out: Vec<OverlayRow> = list
         .iter()
-        .take(10)
+        .take(overlay_row_capacity(o))
         .map(|r| {
-            let (gear_score, power) = gear_of(ui, &r.name);
             let rate = if healing { (seconds > 0.0).then(|| r.heal as f64 / seconds) } else { r.dps };
             OverlayRow {
+                id: r.id,
                 name: r.name.clone().into(),
-                gear_score: gear_score.into(),
-                power: power.into(),
+                class_icon: icons::class_icon(r.class),
+                gear: gear_text(r.combat_power, r.gear_score).into(),
                 value: compact(value(r)).into(),
                 rate: rate.map_or("-".into(), |v| compact(v.round() as i64)).into(),
                 share: value(r) as f32 / top as f32,
@@ -279,11 +340,77 @@ fn apply_overlay(o: &OverlayWindow, cfg: &settings::OverlayConfig, ui: &Ui) {
     sync_model(&o.rows, out);
     let range = if cfg.range == 0 { "Fight" } else { "Total" };
     o.window.set_header(format!("{range} {}  ·  {}", duration_text(seconds), if healing { "Healing" } else { "Damage" }).into());
+
+    let selected = ui.selections.of_overlay(o.id);
+    o.window.set_selected_id(selected);
+    if selected >= 0 {
+        let name = s.rows.iter().find(|r| r.id == selected).map_or_else(|| "Skills".to_string(), |r| format!("Skills of {}", r.name));
+        o.window.set_skills_title(name.into());
+        sync_model(&o.skills, skill_rows(s.skills.get(&selected).map_or(&[][..], Vec::as_slice)));
+    } else {
+        sync_model(&o.skills, Vec::new());
+    }
 }
 
-/// Gear score and combat power of a player, as text. No source for them yet: empty.
-fn gear_of(_ui: &Ui, _name: &str) -> (String, String) {
-    (String::new(), String::new())
+/// How many players fit in an overlay: its height less the header and padding, 24px + 4px per row. With a player's
+/// skills open, at most 5 rows stay so the skills have room.
+fn overlay_row_capacity(o: &OverlayWindow) -> usize {
+    let height = logical_size(o.window.window()).1;
+    let fit = (((height - 8.0 * 2.0 - 20.0) / 28.0).floor() as usize).max(1);
+    if ui_selected(o) { fit.min(5) } else { fit }
+}
+
+fn ui_selected(o: &OverlayWindow) -> bool {
+    o.window.get_selected_id() >= 0
+}
+
+/// Combat power and gear score beside a name: "113k · 2,410". Only party members have them (party roster).
+fn gear_text(combat_power: Option<u64>, gear_score: Option<u32>) -> String {
+    let power = combat_power.filter(|&p| p > 0).map(|p| {
+        let p = p as f64;
+        if p >= 1e6 {
+            format!("{:.1}m", p / 1e6)
+        } else if p >= 1e3 {
+            format!("{:.0}k", p / 1e3)
+        } else {
+            format!("{p:.0}")
+        }
+    });
+    let gear = gear_score.filter(|&g| g > 0).map(|g| thousands(g as u64));
+    match (power, gear) {
+        (Some(p), Some(g)) => format!("{p} · {g}"),
+        (Some(p), None) => p,
+        (None, Some(g)) => g,
+        (None, None) => String::new(),
+    }
+}
+
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn skill_rows(skills: &[za2_core::combat::SkillUsage]) -> Vec<SkillRow> {
+    let total: i64 = skills.iter().map(|k| k.total).sum::<i64>().max(1);
+    skills
+        .iter()
+        .map(|k| SkillRow {
+            icon: icons::skill_icon(k.skill_id),
+            name: k.skill.clone().into(),
+            total: compact(k.total).into(),
+            hits: k.hits.to_string().into(),
+            crit: if k.hits > 0 { format!("{:.0}%", 100.0 * k.crit_hits as f64 / k.hits as f64) } else { String::new() }.into(),
+            share: k.total as f32 / total as f32,
+            min_max: format!("{} - {}", compact(k.min), compact(k.max)).into(),
+        })
+        .collect()
 }
 
 /// Makes `model` hold `rows`, touching only the rows that changed.
@@ -318,6 +445,9 @@ struct Ui {
     commands: SyncSender<WorkerCommand>,
     shared: Arc<Shared>,
     filters: Filters,
+    selections: Rc<Selections>,
+    /// How far the map overlay is moved away from the player, in world units.
+    overlay_pan: (f64, f64),
 }
 
 #[derive(Default)]
@@ -327,6 +457,8 @@ struct Filters {
     /// The search of the map overlay.
     overlay_query: String,
     expanded: std::collections::BTreeSet<String>,
+    /// Pets of the monster list that show their monsters.
+    expanded_pets: std::collections::BTreeSet<i32>,
 }
 
 fn displayed_map(ui: &Ui) -> &'static MapInfo {
@@ -350,7 +482,10 @@ fn to_tiles(quads: Vec<map::TileQuad>) -> ModelRc<MapTile> {
 
 fn to_markers(markers: &[Marker]) -> ModelRc<MapMarker> {
     let list: Vec<MapMarker> =
-        markers.iter().map(|m| MapMarker { x: m.x, y: m.y, size: m.size, color: rgb(m.color), live: m.live, level: m.level }).collect();
+        markers
+            .iter()
+            .map(|m| MapMarker { x: m.x, y: m.y, size: m.size, color: rgb(m.color), icon: m.icon.map(icons::load).unwrap_or_default(), live: m.live, level: m.level })
+            .collect();
     ModelRc::new(VecModel::from(list))
 }
 
@@ -358,6 +493,7 @@ struct ShownRow {
     id: i32,
     name: String,
     class: Option<String>,
+    gear: String,
     damage: i64,
     dps: Option<f64>,
     heal: i64,
@@ -392,6 +528,7 @@ fn apply_meter(app: &App, ui: &Ui) {
                 id: r.id,
                 name: r.name.clone(),
                 class: r.class.clone(),
+                gear: String::new(),
                 damage: r.damage,
                 dps: r.dps,
                 heal: r.heal,
@@ -408,6 +545,7 @@ fn apply_meter(app: &App, ui: &Ui) {
                 id: r.id,
                 name: r.name.clone(),
                 class: r.class.map(str::to_string),
+                gear: gear_text(r.combat_power, r.gear_score),
                 damage: r.damage,
                 dps: r.dps,
                 heal: r.heal,
@@ -433,10 +571,10 @@ fn apply_meter(app: &App, ui: &Ui) {
         .iter()
         .map(|r| MeterRow {
             id: r.id,
-            gear_score: gear_of(ui, &r.name).0.into(),
-            power: gear_of(ui, &r.name).1.into(),
+            gear: r.gear.clone().into(),
             name: r.name.clone().into(),
             class_name: r.class.clone().unwrap_or_default().into(),
+            class_icon: icons::class_icon(r.class.as_deref()),
             damage: compact(r.damage).into(),
             dps: r.dps.map_or("-".into(), |d| compact(d.round() as i64)).into(),
             share: r.damage as f32 / top as f32,
@@ -475,22 +613,10 @@ fn apply_meter(app: &App, ui: &Ui) {
         app.set_skills_title("Skill details are kept for the current encounter only".into());
         return;
     }
-    let skill_total: i64 = s.skills.iter().map(|k| k.total).sum::<i64>().max(1);
-    let skills: Vec<SkillRow> = s
-        .skills
-        .iter()
-        .map(|k| SkillRow {
-            name: k.skill.clone().into(),
-            total: compact(k.total).into(),
-            hits: k.hits.to_string().into(),
-            crit: if k.hits > 0 { format!("{:.0}%", 100.0 * k.crit_hits as f64 / k.hits as f64) } else { String::new() }.into(),
-            share: k.total as f32 / skill_total as f32,
-            min_max: format!("{} - {}", compact(k.min), compact(k.max)).into(),
-        })
-        .collect();
-    sync_model(&ui.models.skills, skills);
-    let title = if s.skills_of >= 0 {
-        s.rows.iter().find(|r| r.id == s.skills_of).map(|r| format!("Skills of {}", r.name)).unwrap_or_else(|| "Skills".into())
+    let selected = ui.selections.meter.get();
+    sync_model(&ui.models.skills, skill_rows(s.skills.get(&selected).map_or(&[][..], Vec::as_slice)));
+    let title = if selected >= 0 {
+        s.rows.iter().find(|r| r.id == selected).map(|r| format!("Skills of {}", r.name)).unwrap_or_else(|| "Skills".into())
     } else {
         "Select a player to see the skills".into()
     };
@@ -537,14 +663,84 @@ fn resource_items(kind: &str, map: &MapInfo, query: &str) -> Vec<&'static gather
 }
 
 /// Pet monsters of the map with their names, filtered by the search, sorted by name.
-fn monster_list(map: &MapInfo, query: &str) -> Vec<(i32, String)> {
-    let mut list: Vec<(i32, String)> = pets::pets_on_map(&map.table)
-        .into_iter()
-        .map(|id| (id, pets::pet_name(id, "en").map(str::to_string).unwrap_or_else(|| format!("#{id}"))))
-        .filter(|(_, name)| matches_query(name, query))
-        .collect();
-    list.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
-    list
+fn monster_name(npc: i32) -> String {
+    za2_core::catalog::npcs::name_of(npc, "en").map_or_else(|| format!("#{npc}"), str::to_string)
+}
+
+fn pet_label(pet: i32) -> String {
+    pets::pet_name(pet, "en").map_or_else(|| format!("Pet #{pet}"), str::to_string)
+}
+
+/// " · Elite" for the ranks above normal.
+fn rank_suffix(npc: i32) -> &'static str {
+    match za2_core::catalog::monsters::info(npc).map(|m| m.rank.as_str()) {
+        Some("Elite") => " · Elite",
+        Some("Hero") => " · Hero",
+        Some("Legend") => " · Legend",
+        _ => "",
+    }
+}
+
+/// The monsters of a map, grouped: each pet with the monsters that give it (sorted by pet name), then the monsters that give
+/// no pet. Only what matches `query` (a pet matches by its own name or a monster's; then its matching monsters are shown).
+fn monster_groups(map: &MapInfo, query: &str) -> (Vec<(i32, Vec<i32>)>, Vec<i32>) {
+    let on_map = za2_core::catalog::monsters::on_map(&map.table);
+    let by_name = |a: &i32, b: &i32| monster_name(*a).to_lowercase().cmp(&monster_name(*b).to_lowercase());
+    let mut groups: Vec<(i32, Vec<i32>)> = Vec::new();
+    let mut alone: Vec<i32> = Vec::new();
+    for &npc in &on_map {
+        let pets_of = pets::pets_of_npc(npc);
+        if pets_of.is_empty() {
+            if matches_query(&monster_name(npc), query) {
+                alone.push(npc);
+            }
+            continue;
+        }
+        for &pet in pets_of {
+            if !(matches_query(&pet_label(pet), query) || matches_query(&monster_name(npc), query)) {
+                continue;
+            }
+            match groups.iter_mut().find(|g| g.0 == pet) {
+                Some(g) => g.1.push(npc),
+                None => groups.push((pet, vec![npc])),
+            }
+        }
+    }
+    for g in &mut groups {
+        g.1.sort_by(by_name);
+    }
+    groups.sort_by(|a, b| pet_label(a.0).to_lowercase().cmp(&pet_label(b.0).to_lowercase()));
+    alone.sort_by(by_name);
+    (groups, alone)
+}
+
+/// Ticks a pet (all its monsters) or unticks it with its monsters.
+fn toggle_pet(settings: &mut Settings, pet: i32, on: bool) {
+    let npcs = pets::npcs_of_pet(pet);
+    settings.monsters.retain(|n| !npcs.contains(n));
+    if on {
+        settings.pets.insert(pet);
+    } else {
+        settings.pets.remove(&pet);
+    }
+}
+
+/// Ticks one monster, or unticks it; unticking a monster of a ticked pet keeps the pet's other monsters ticked.
+fn toggle_monster(settings: &mut Settings, npc: i32, on: bool) {
+    if on {
+        settings.monsters.insert(npc);
+        return;
+    }
+    settings.monsters.remove(&npc);
+    for pet in pets::pets_of_npc(npc) {
+        if settings.pets.remove(pet) {
+            settings.monsters.extend(pets::npcs_of_pet(*pet).iter().filter(|&&n| n != npc));
+        }
+    }
+}
+
+fn monster_spawn_count(map: &MapInfo, npc: i32) -> usize {
+    za2_core::catalog::monsters::spawns_of(&map.table, npc).len()
 }
 
 /// The map the player stands on, else the one the app shows.
@@ -575,14 +771,27 @@ fn apply_overlay_search(overlay: &MapOverlay, ui: &Ui) {
                 detail: places.to_string().into(),
                 checked: on,
                 color: rgb(map::gather_color(&item.kind)),
+                icon: map_icons::gather(&item.kind).map(icons::load).unwrap_or_default(),
                 ..Default::default()
             });
         }
     }
-    for (id, name) in monster_list(map, "") {
-        let on = ui.settings.pets.contains(&id);
-        if wanted(&name) {
-            rows.push(FilterRow { key: format!("p:{id}").into(), label: name.into(), detail: "monster".into(), checked: on, color: rgb((0xE0, 0x50, 0x50)), ..Default::default() });
+    let colors: HashMap<i32, (u8, u8, u8)> = map::monster_colors(&map.table, &ui.settings.pets, &ui.settings.monsters).into_iter().collect();
+    let (groups, _) = monster_groups(map, query);
+    for (pet, _) in &groups {
+        let on = ui.settings.pets.contains(pet);
+        let icon = pets::icon_of(*pet).map(icons::load).unwrap_or_default();
+        let color = pets::npcs_of_pet(*pet).iter().find_map(|n| colors.get(n)).copied().unwrap_or((0xE0, 0x50, 0x50));
+        rows.push(FilterRow { key: format!("p:{pet}").into(), label: pet_label(*pet).into(), detail: "pet".into(), checked: on, color: rgb(color), icon, ..Default::default() });
+    }
+    // every monster of the map by its own name (also those that give a pet)
+    if !query.is_empty() {
+        for npc in za2_core::catalog::monsters::on_map(&map.table).into_iter().filter(|n| matches_query(&monster_name(*n), query)) {
+            let on = ui.settings.monsters.contains(&npc);
+            let icon = map::monster_icon(npc).map(icons::load).unwrap_or_default();
+            let color = colors.get(&npc).copied().unwrap_or((0xE0, 0x50, 0x50));
+            let detail = format!("monster{}", rank_suffix(npc));
+            rows.push(FilterRow { key: format!("m:{npc}").into(), label: monster_name(npc).into(), detail: detail.into(), checked: on, color: rgb(color), icon, ..Default::default() });
         }
     }
     ticked_first(&mut rows, !query.is_empty());
@@ -618,6 +827,8 @@ fn apply_filters(app: &App, ui: &Ui) {
             checked: picked == shown.len(),
             partial: picked > 0 && picked < shown.len(),
             color: rgb(map::gather_color(kind)),
+            icon: map_icons::gather(kind).map(icons::load).unwrap_or_default(),
+            child: false,
         });
         if expanded {
             let mut shown = shown;
@@ -635,6 +846,8 @@ fn apply_filters(app: &App, ui: &Ui) {
                     checked: selected.contains(&item.key),
                     partial: false,
                     color: rgb(map::gather_color(&item.kind)),
+                    icon: Default::default(),
+                    child: true,
                 });
             }
         }
@@ -647,33 +860,45 @@ fn apply_filters(app: &App, ui: &Ui) {
     app.set_resource_rows(ModelRc::new(VecModel::from(rows)));
     app.set_resource_summary(summary.into());
 
-    // The map overlay gives the selected pets of this map palette colours in id order; the list uses the same.
-    let monsters = monster_list(map, ui.filters.monster_query.trim());
-    let mut colored: Vec<i32> = pets::pets_on_map(&map.table).into_iter().filter(|id| ui.settings.pets.contains(id)).collect();
-    colored.sort_unstable();
-    let spawns = pets::spawn_table(&map.table);
-    let monster_rows: Vec<FilterRow> = monsters
-        .iter()
-        .map(|(id, name)| {
-            let points: usize = spawns
-                .map(|t| t.iter().filter(|(npc, _)| pets::pets_of_npc(**npc).contains(id)).map(|(_, p)| p.len()).sum())
-                .unwrap_or(0);
-            let color = colored.iter().position(|c| c == id).map_or((255, 255, 255), |i| map::PET_PALETTE[i % map::PET_PALETTE.len()]);
-            FilterRow {
-                key: id.to_string().into(),
-                label: name.clone().into(),
-                detail: format!("{points} spawns").into(),
-                header: false,
-                expanded: false,
-                checked: ui.settings.pets.contains(id),
-                partial: false,
-                color: rgb(color),
-            }
-        })
-        .collect();
-    let mut monster_rows = monster_rows;
-    ticked_first(&mut monster_rows, !ui.filters.monster_query.trim().is_empty());
-    let summary = format!("{} shown  ·  {} selected", monster_rows.len(), colored.len());
+    // Pets with the monsters that give them, then the other monsters; colours as on the map (map::monster_colors).
+    let query = ui.filters.monster_query.trim();
+    let colors: HashMap<i32, (u8, u8, u8)> = map::monster_colors(&map.table, &ui.settings.pets, &ui.settings.monsters).into_iter().collect();
+    let (groups, alone) = monster_groups(map, query);
+    let monster_row = |npc: i32, checked: bool, child: bool| FilterRow {
+        key: npc.to_string().into(),
+        label: monster_name(npc).into(),
+        detail: format!("{} spawns{}", monster_spawn_count(map, npc), rank_suffix(npc)).into(),
+        checked,
+        color: rgb(colors.get(&npc).copied().unwrap_or((255, 255, 255))),
+        icon: map::monster_icon(npc).map(icons::load).unwrap_or_default(),
+        child,
+        ..Default::default()
+    };
+    let mut monster_rows: Vec<FilterRow> = Vec::new();
+    for (pet, npcs) in &groups {
+        let pet_on = ui.settings.pets.contains(pet);
+        let some = npcs.iter().any(|n| ui.settings.monsters.contains(n));
+        let expanded = !query.is_empty() || ui.filters.expanded_pets.contains(pet);
+        let spawns: usize = npcs.iter().map(|&n| monster_spawn_count(map, n)).sum();
+        monster_rows.push(FilterRow {
+            key: pet.to_string().into(),
+            label: pet_label(*pet).into(),
+            detail: format!("{} monster{} · {spawns} spawns", npcs.len(), if npcs.len() == 1 { "" } else { "s" }).into(),
+            header: true,
+            expanded,
+            checked: pet_on,
+            partial: !pet_on && some,
+            color: rgb(npcs.iter().find_map(|n| colors.get(n)).copied().unwrap_or((255, 255, 255))),
+            icon: pets::icon_of(*pet).map(icons::load).unwrap_or_default(),
+            child: false,
+        });
+        if expanded {
+            monster_rows.extend(npcs.iter().map(|&n| monster_row(n, pet_on || ui.settings.monsters.contains(&n), true)));
+        }
+    }
+    monster_rows.extend(alone.iter().map(|&n| monster_row(n, ui.settings.monsters.contains(&n), false)));
+    let shown_monsters = groups.iter().map(|g| g.1.len()).sum::<usize>() + alone.len();
+    let summary = format!("{} pets · {shown_monsters} monsters  ·  {} marked", groups.len(), colors.len());
     app.set_monster_rows(ModelRc::new(VecModel::from(monster_rows)));
     app.set_monster_summary(summary.into());
 }
@@ -706,7 +931,7 @@ fn apply_map(app: &App, ui: &mut Ui, force: bool) {
 
     let view = View { center_x: ui.map.center.0, center_y: ui.map.center.1, radius_metres: ui.settings.map_radius_metres, width, height };
     let faction = faction_of(&ui.snapshot);
-    ui.map.layer.update(Some(map), &ui.settings.gather_items, &ui.settings.pets, faction);
+    ui.map.layer.update(Some(map), &ui.settings.gather_items, &ui.settings.pets, &ui.settings.monsters, faction);
     let quads = map::visible_tiles(map, &view, &mut ui.loader);
     let known = tracked_here && position.as_ref().is_some_and(|p| matches!(p.state, PositionState::Exact | PositionState::Estimated));
     let live = LiveInputs {
@@ -717,7 +942,6 @@ fn apply_map(app: &App, ui: &mut Ui, force: bool) {
         mobs: &ui.snapshot.live_mobs,
         show_live_mobs: ui.settings.show_live_mobs,
         show_cubes: ui.settings.show_cubes,
-        pet_ids: &ui.settings.pets,
     };
     map::markers(map, &view, &ui.map.layer, &live, &mut ui.map.markers);
     app.set_tiles(to_tiles(quads));
@@ -799,13 +1023,14 @@ fn apply_map_overlay(overlay: &MapOverlay, ui: &mut Ui, force: bool) {
     if width < 10.0 || height < 10.0 {
         return;
     }
-    let key = (map.key.clone(), (p.x as i64, p.y as i64), (width as i64, height as i64), ui.snapshot.version);
+    let center = (p.x as f64 + ui.overlay_pan.0, p.y as f64 + ui.overlay_pan.1);
+    let key = (map.key.clone(), (center.0 as i64, center.1 as i64), (width as i64, height as i64), ui.snapshot.version);
     if !force && ui.map.last_overlay.as_ref() == Some(&key) {
         return;
     }
     ui.map.last_overlay = Some(key);
-    let view = View { center_x: p.x as f64, center_y: p.y as f64, radius_metres: ui.settings.overlay_radius_metres, width, height };
-    ui.map.overlay_layer.update(Some(map), &ui.settings.gather_items, &ui.settings.pets, faction_of(&ui.snapshot));
+    let view = View { center_x: center.0, center_y: center.1, radius_metres: ui.settings.overlay_radius_metres, width, height };
+    ui.map.overlay_layer.update(Some(map), &ui.settings.gather_items, &ui.settings.pets, &ui.settings.monsters, faction_of(&ui.snapshot));
     let quads = map::visible_tiles(map, &view, &mut ui.loader);
     let live = LiveInputs {
         known: matches!(p.state, PositionState::Exact | PositionState::Estimated),
@@ -815,15 +1040,16 @@ fn apply_map_overlay(overlay: &MapOverlay, ui: &mut Ui, force: bool) {
         mobs: &ui.snapshot.live_mobs,
         show_live_mobs: ui.settings.show_live_mobs,
         show_cubes: ui.settings.show_cubes,
-        pet_ids: &ui.settings.pets,
     };
     let mut markers = Vec::new();
     map::markers(map, &view, &ui.map.overlay_layer, &live, &mut markers);
     overlay.set_tiles(to_tiles(quads));
     overlay.set_markers(to_markers(&markers));
+    let (me_x, me_y) = view.to_screen(map, p.x as f64, p.y as f64);
     overlay.set_me_visible(p.state != PositionState::Unknown);
-    overlay.set_me_x((width / 2.0) as f32);
-    overlay.set_me_y((height / 2.0) as f32);
+    overlay.set_me_x(me_x as f32);
+    overlay.set_me_y(me_y as f32);
+    overlay.set_panned(ui.overlay_pan != (0.0, 0.0));
     overlay.set_me_heading(p.heading as f32);
     overlay.set_me_color(state_color(p.state));
     overlay.set_me_label(if p.state == PositionState::Stale { "?".into() } else { SharedString::new() });
@@ -836,6 +1062,30 @@ fn zoom_map_overlay(app: &App, overlay: &MapOverlay, ui: &mut Ui, delta: f32) {
     ui.settings.save();
     app.set_overlay_radius(radius as f32);
     apply_map_overlay(overlay, ui, true);
+}
+
+/// Saves the sizes of the overlays the user resized, so they open at that size next time.
+fn remember_overlay_sizes(ui: &mut Ui, map_overlay: &MapOverlay) {
+    let mut changed = false;
+    let sizes: Vec<(u32, (f32, f32))> = ui.overlays.iter().filter(|o| o.shown).map(|o| (o.id, logical_size(o.window.window()))).collect();
+    for (id, size) in sizes {
+        if let Some(cfg) = ui.settings.overlays.iter_mut().find(|c| c.id == id) {
+            if size.0 >= 1.0 && cfg.size != Some(size) {
+                cfg.size = Some(size);
+                changed = true;
+            }
+        }
+    }
+    if ui.settings.map_overlay && map_overlay.window().is_visible() {
+        let size = logical_size(map_overlay.window());
+        if size.0 >= 1.0 && ui.settings.map_overlay_size != Some(size) {
+            ui.settings.map_overlay_size = Some(size);
+            changed = true;
+        }
+    }
+    if changed {
+        ui.settings.save();
+    }
 }
 
 fn cube_beep(ui: &mut Ui) {
@@ -992,6 +1242,8 @@ fn main() {
         models: Models::new(&app),
         overlays: Vec::new(),
         sound_test: None,
+        selections: Rc::new(Selections::new()),
+        overlay_pan: (0.0, 0.0),
     }));
 
     app.set_map_names(ModelRc::new(VecModel::from(maps::all().iter().map(|m| SharedString::from(m.title.as_str())).collect::<Vec<_>>())));
@@ -1000,6 +1252,8 @@ fn main() {
     app.set_scope(settings.scope);
     app.set_show_live_mobs(settings.show_live_mobs);
     app.set_show_cubes(settings.show_cubes);
+    app.set_mob_icon(map_icons::named("mob").map(icons::load).unwrap_or_default());
+    app.set_cube_icon(map_icons::gather("Cube").map(icons::load).unwrap_or_default());
     app.set_cube_sound(settings.cube_sound_enabled);
     app.set_cube_volume(settings.cube_sound_volume as f32);
     app.set_meter_overlay(settings.meter_overlay);
@@ -1036,7 +1290,10 @@ fn main() {
             let app = weak.unwrap();
             let next = if app.get_selected_row() == id { -1 } else { id };
             app.set_selected_row(next);
-            let _ = ui.borrow().commands.send(WorkerCommand::SelectSource(next));
+            let u = ui.borrow();
+            u.selections.meter.set(next);
+            u.selections.send(&u.commands);
+            apply_meter(&app, &u);
         });
     }
     {
@@ -1227,16 +1484,39 @@ fn main() {
         app.on_toggle_pet(move |key, on| {
             let app = weak.unwrap();
             let mut u = ui.borrow_mut();
-            if let Ok(id) = key.parse::<i32>() {
-                if on {
-                    u.settings.pets.insert(id);
-                } else {
-                    u.settings.pets.remove(&id);
-                }
+            if let Ok(pet) = key.parse::<i32>() {
+                toggle_pet(&mut u.settings, pet, on);
             }
             u.settings.save();
             apply_filters(&app, &u);
             apply_map(&app, &mut u, true);
+        });
+    }
+    {
+        let ui = ui.clone();
+        let weak = app.as_weak();
+        app.on_toggle_monster(move |key, on| {
+            let app = weak.unwrap();
+            let mut u = ui.borrow_mut();
+            if let Ok(npc) = key.parse::<i32>() {
+                toggle_monster(&mut u.settings, npc, on);
+            }
+            u.settings.save();
+            apply_filters(&app, &u);
+            apply_map(&app, &mut u, true);
+        });
+    }
+    {
+        let ui = ui.clone();
+        let weak = app.as_weak();
+        app.on_expand_pet(move |key| {
+            let mut u = ui.borrow_mut();
+            if let Ok(pet) = key.parse::<i32>() {
+                if !u.filters.expanded_pets.remove(&pet) {
+                    u.filters.expanded_pets.insert(pet);
+                }
+            }
+            apply_filters(&weak.unwrap(), &u);
         });
     }
     {
@@ -1275,8 +1555,9 @@ fn main() {
         app.on_select_shown_monsters(move || {
             let app = weak.unwrap();
             let mut u = ui.borrow_mut();
-            let shown: Vec<i32> = monster_list(displayed_map(&u), u.filters.monster_query.trim()).into_iter().map(|m| m.0).collect();
-            u.settings.pets.extend(shown);
+            let (groups, alone) = monster_groups(displayed_map(&u), u.filters.monster_query.trim());
+            u.settings.pets.extend(groups.iter().map(|g| g.0));
+            u.settings.monsters.extend(alone);
             u.settings.save();
             apply_filters(&app, &u);
             apply_map(&app, &mut u, true);
@@ -1289,6 +1570,7 @@ fn main() {
             let app = weak.unwrap();
             let mut u = ui.borrow_mut();
             u.settings.pets.clear();
+            u.settings.monsters.clear();
             u.settings.save();
             apply_filters(&app, &u);
             apply_map(&app, &mut u, true);
@@ -1344,12 +1626,10 @@ fn main() {
                 } else {
                     u.settings.gather_items.remove(item);
                 }
-            } else if let Some(id) = key.strip_prefix("p:").and_then(|id| id.parse::<i32>().ok()) {
-                if on {
-                    u.settings.pets.insert(id);
-                } else {
-                    u.settings.pets.remove(&id);
-                }
+            } else if let Some(pet) = key.strip_prefix("p:").and_then(|id| id.parse::<i32>().ok()) {
+                toggle_pet(&mut u.settings, pet, on);
+            } else if let Some(npc) = key.strip_prefix("m:").and_then(|id| id.parse::<i32>().ok()) {
+                toggle_monster(&mut u.settings, npc, on);
             }
             u.settings.save();
             apply_filters(&app, &u);
@@ -1520,6 +1800,32 @@ fn main() {
         });
     }
     {
+        let pan_ui = ui.clone();
+        let mapo = map_overlay.as_weak();
+        map_overlay.on_pan_by(move |dx, dy| {
+            let o = mapo.unwrap();
+            let ui = &pan_ui;
+            let mut u = ui.borrow_mut();
+            let (width, height) = (o.get_view_width() as f64, o.get_view_height() as f64);
+            let ppu = View { center_x: 0.0, center_y: 0.0, radius_metres: u.settings.overlay_radius_metres, width, height }.pixels_per_unit();
+            u.overlay_pan.0 -= dx as f64 / ppu;
+            u.overlay_pan.1 -= dy as f64 / ppu;
+            apply_map_overlay(&o, &mut u, true);
+        });
+        let ui = ui.clone();
+        let mapo = map_overlay.as_weak();
+        map_overlay.on_recenter(move || {
+            let mut u = ui.borrow_mut();
+            u.overlay_pan = (0.0, 0.0);
+            apply_map_overlay(&mapo.unwrap(), &mut u, true);
+        });
+        let weak = map_overlay.as_weak();
+        map_overlay.on_resize(move |edge| resize_window(&weak.unwrap(), resize_direction(edge)));
+    }
+    if let Some((w, h)) = settings.map_overlay_size {
+        map_overlay.window().set_size(slint::LogicalSize::new(w, h));
+    }
+    {
         let weak = map_overlay.as_weak();
         map_overlay.on_drag(move || {
             move_window(&weak.unwrap());
@@ -1552,20 +1858,7 @@ fn main() {
             let _ = slint::quit_event_loop();
         });
         let weak = app.as_weak();
-        app.on_window_resize(move |edge| {
-            use winit::window::ResizeDirection as D;
-            let direction = match edge {
-                0 => D::North,
-                1 => D::South,
-                2 => D::East,
-                3 => D::West,
-                4 => D::NorthEast,
-                5 => D::NorthWest,
-                6 => D::SouthEast,
-                _ => D::SouthWest,
-            };
-            resize_window(&weak.unwrap(), direction);
-        });
+        app.on_window_resize(move |edge| resize_window(&weak.unwrap(), resize_direction(edge)));
     }
 
     let timer = slint::Timer::default();
@@ -1575,6 +1868,7 @@ fn main() {
         let mapo = map_overlay.as_weak();
         let mut filters_for: Option<String> = None;
         let mut learned_saved = false;
+        let mut size_check = Instant::now();
         timer.start(slint::TimerMode::Repeated, Duration::from_millis(100), move || {
             let (app, mapo) = (weak.unwrap(), mapo.unwrap());
             let mut u = ui.borrow_mut();
@@ -1631,6 +1925,10 @@ fn main() {
             }
             if u.settings.map_overlay && (fresh || tiles_arrived) {
                 apply_map_overlay(&mapo, &mut u, tiles_arrived);
+            }
+            if size_check.elapsed() >= Duration::from_secs(1) {
+                size_check = Instant::now();
+                remember_overlay_sizes(&mut u, &mapo);
             }
         });
     }
@@ -1691,6 +1989,31 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_monster_is_found_by_its_name_under_its_pet() {
+        let altgard = maps::by_key("altgard").unwrap();
+        let (groups, _) = monster_groups(altgard, "poison blood gatherer");
+        assert_eq!(groups, vec![(1195, vec![2400746])]);
+    }
+
+    #[test]
+    fn unticking_a_monster_of_a_ticked_pet_keeps_the_others() {
+        let mut settings = Settings::default();
+        toggle_pet(&mut settings, 1195, true);
+        let others: Vec<i32> = pets::npcs_of_pet(1195).iter().copied().filter(|&n| n != 2400746).collect();
+        toggle_monster(&mut settings, 2400746, false);
+        assert!(!settings.pets.contains(&1195));
+        assert!(others.iter().all(|n| settings.monsters.contains(n)) && !settings.monsters.contains(&2400746));
+    }
+
+    #[test]
+    fn gear_text_is_power_then_gear_score() {
+        assert_eq!(gear_text(Some(113_456), Some(2410)), "113k · 2,410");
+        assert_eq!(gear_text(Some(1_260_000), Some(12_345)), "1.3m · 12,345");
+        assert_eq!(gear_text(None, Some(980)), "980");
+        assert_eq!(gear_text(Some(0), None), "");
+    }
 
     #[test]
     fn cube_sound_speeds_up_and_stops_at_the_cube() {

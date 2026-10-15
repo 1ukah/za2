@@ -1,0 +1,14 @@
+[package]
+name = "keyscan"
+version = "0.1.0"
+edition = "2021"
+description = "Finds the AION 2 pak AES key in the memory of the running game (see ../find_aes_key.py)"
+
+[dependencies]
+aes = "0.8"
+
+[profile.release]
+opt-level = 3
+
+# not part of the za2 workspace
+[workspace]

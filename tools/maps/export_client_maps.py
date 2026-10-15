@@ -2,7 +2,7 @@
 
 Usage: python3 export_client_maps.py <dir with Verteron_tiles, Altgard_tiles, Abyss_tiles> <out dir> <calibration.json>
 Writes <out>/<map>/<col>_<row>.jpg and <col>_<row>_a.png (half size mask) and <out>/maps.json with everything za2 needs:
-the tile size, the grid, the world -> native pixel calibration and the key of the map's spawn table in pets/spawns.json.
+the tile size, the grid, the world -> native pixel calibration and the key of the map's spawn table in npcs/spawns.json.
 """
 import json
 import os

@@ -9,8 +9,9 @@ za2 is a DPS meter and interactive map for Aion 2 on Linux. It reads the game tr
 ## Features
 
 - See DPS, damage, healing, critical hits and skills for each player.
+- See the combat power and gear score of the members of your party.
 - Show all players, your group or only you.
-- Use a map with your position, live monsters, gathering spots and Hidden Cubes.
+- Use a map with your position, monsters, gathering spots and Hidden Cubes.
 - Hear a sound that becomes faster near a Hidden Cube.
 - Show the meter and the map as overlays on top of the game.
 
