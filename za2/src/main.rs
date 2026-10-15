@@ -484,7 +484,7 @@ fn to_markers(markers: &[Marker]) -> ModelRc<MapMarker> {
     let list: Vec<MapMarker> =
         markers
             .iter()
-            .map(|m| MapMarker { x: m.x, y: m.y, size: m.size, color: rgb(m.color), icon: m.icon.map(icons::load).unwrap_or_default(), live: m.live, level: m.level })
+            .map(|m| MapMarker { x: m.x, y: m.y, size: m.size, color: rgb(m.color), icon: m.icon.map(icons::load).unwrap_or_default(), glyph: m.glyph, live: m.live, level: m.level })
             .collect();
     ModelRc::new(VecModel::from(list))
 }
@@ -789,9 +789,10 @@ fn apply_overlay_search(overlay: &MapOverlay, ui: &Ui) {
         for npc in za2_core::catalog::monsters::on_map(&map.table).into_iter().filter(|n| matches_query(&monster_name(*n), query)) {
             let on = ui.settings.monsters.contains(&npc);
             let icon = map::monster_icon(npc).map(icons::load).unwrap_or_default();
+            let glyph = map::monster_icon(npc).is_none();
             let color = colors.get(&npc).copied().unwrap_or((0xE0, 0x50, 0x50));
             let detail = format!("monster{}", rank_suffix(npc));
-            rows.push(FilterRow { key: format!("m:{npc}").into(), label: monster_name(npc).into(), detail: detail.into(), checked: on, color: rgb(color), icon, ..Default::default() });
+            rows.push(FilterRow { key: format!("m:{npc}").into(), label: monster_name(npc).into(), detail: detail.into(), checked: on, color: rgb(color), icon, glyph, ..Default::default() });
         }
     }
     ticked_first(&mut rows, !query.is_empty());
@@ -818,6 +819,7 @@ fn apply_filters(app: &App, ui: &Ui) {
         let places: usize = all.iter().map(|i| gather::points_of(&map.table, &i.key).len()).sum();
         let picked = shown.iter().filter(|i| selected.contains(&i.key)).count();
         let expanded = !query.is_empty() || ui.filters.expanded.contains(kind);
+        let icon = map_icons::gather(kind).map(icons::load).unwrap_or_default();
         rows.push(FilterRow {
             key: (*kind).into(),
             label: map::kind_label(kind).into(),
@@ -827,7 +829,8 @@ fn apply_filters(app: &App, ui: &Ui) {
             checked: picked == shown.len(),
             partial: picked > 0 && picked < shown.len(),
             color: rgb(map::gather_color(kind)),
-            icon: map_icons::gather(kind).map(icons::load).unwrap_or_default(),
+            icon: icon.clone(),
+            glyph: false,
             child: false,
         });
         if expanded {
@@ -846,7 +849,8 @@ fn apply_filters(app: &App, ui: &Ui) {
                     checked: selected.contains(&item.key),
                     partial: false,
                     color: rgb(map::gather_color(&item.kind)),
-                    icon: Default::default(),
+                    icon: icon.clone(),
+                    glyph: false,
                     child: true,
                 });
             }
@@ -871,6 +875,7 @@ fn apply_filters(app: &App, ui: &Ui) {
         checked,
         color: rgb(colors.get(&npc).copied().unwrap_or((255, 255, 255))),
         icon: map::monster_icon(npc).map(icons::load).unwrap_or_default(),
+        glyph: map::monster_icon(npc).is_none(),
         child,
         ..Default::default()
     };
@@ -890,6 +895,7 @@ fn apply_filters(app: &App, ui: &Ui) {
             partial: !pet_on && some,
             color: rgb(npcs.iter().find_map(|n| colors.get(n)).copied().unwrap_or((255, 255, 255))),
             icon: pets::icon_of(*pet).map(icons::load).unwrap_or_default(),
+            glyph: false,
             child: false,
         });
         if expanded {
@@ -1252,7 +1258,6 @@ fn main() {
     app.set_scope(settings.scope);
     app.set_show_live_mobs(settings.show_live_mobs);
     app.set_show_cubes(settings.show_cubes);
-    app.set_mob_icon(map_icons::named("mob").map(icons::load).unwrap_or_default());
     app.set_cube_icon(map_icons::gather("Cube").map(icons::load).unwrap_or_default());
     app.set_cube_sound(settings.cube_sound_enabled);
     app.set_cube_volume(settings.cube_sound_volume as f32);

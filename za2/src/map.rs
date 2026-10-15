@@ -258,12 +258,21 @@ pub struct Marker {
     pub level: i32,
     /// Game icon (relative to the assets folder) drawn instead of the dot, in a ring of `color`.
     pub icon: Option<&'static str>,
+    /// A monster without a portrait: the monster glyph in a ring of `color` instead of the dot.
+    pub glyph: bool,
 }
 
 /// Live things with an icon are drawn this big, static places from this zoom on (radius in metres).
 const LIVE_ICON_SIZE: f32 = 22.0;
 const STATIC_ICON_SIZE: f32 = 16.0;
 const STATIC_ICON_RADIUS: f64 = 500.0;
+/// Markers have their base size at this zoom (radius in metres) and grow or shrink with the square root of the zoom.
+const MARKER_REF_RADIUS: f64 = 250.0;
+
+/// How much bigger than their base size markers are drawn at this zoom.
+pub fn marker_scale(radius_metres: f64) -> f32 {
+    (MARKER_REF_RADIUS / radius_metres.max(1.0)).sqrt().clamp(0.6, 2.5) as f32
+}
 
 /// Whether something at height `z` is clearly above (1) or below (-1) the player.
 pub fn level_of(z: f32, player_z: Option<f32>) -> i32 {
@@ -335,19 +344,20 @@ pub fn monster_colors(table: &str, pet_ids: &BTreeSet<i32>, monster_ids: &BTreeS
     out
 }
 
-/// The icon of a monster: its portrait, else the portrait of its pet, else the game's minimap marker of its rank.
+/// The icon of a monster: its portrait, else the portrait of its pet (none: drawn as the monster glyph).
 pub fn monster_icon(npc: i32) -> Option<&'static str> {
-    monsters::info(npc)
-        .and_then(|m| m.icon.as_deref())
-        .or_else(|| pets::pets_of_npc(npc).iter().find_map(|&p| pets::icon_of(p)))
-        .or_else(|| rank_marker(npc))
+    monsters::info(npc).and_then(|m| m.icon.as_deref()).or_else(|| pets::pets_of_npc(npc).iter().find_map(|&p| pets::icon_of(p)))
 }
 
-/// The game's minimap marker of a monster's rank (normal, elite, boss).
-pub fn rank_marker(npc: i32) -> Option<&'static str> {
-    let boss = monsters::is_boss_rank(npc) || bosses::find(npc).is_some();
-    let elite = monsters::info(npc).is_some_and(|m| m.rank == "Elite");
-    map_icons::named(if boss { "boss" } else if elite { "elite" } else { "mob" })
+/// The ring colour of a monster that is not selected, by its rank (normal, elite, boss).
+pub fn rank_color(npc: i32) -> (u8, u8, u8) {
+    if monsters::is_boss_rank(npc) || bosses::find(npc).is_some() {
+        (0xFF, 0xC8, 0x3D)
+    } else if monsters::info(npc).is_some_and(|m| m.rank == "Elite") {
+        (0xFF, 0x8A, 0x3D)
+    } else {
+        (0xE0, 0x50, 0x50)
+    }
 }
 
 impl StaticLayer {
@@ -412,20 +422,24 @@ pub fn markers(map: &MapInfo, view: &View, layer: &StaticLayer, live: &LiveInput
         live.known && dx.abs() < ANNOUNCE_RANGE && dy.abs() < ANNOUNCE_RANGE && dx * dx + dy * dy < ANNOUNCE_RANGE * ANNOUNCE_RANGE
     };
     let live_env_matches = |key: &str, x: f32, y: f32| live.env.iter().any(|e| e.key == key && (e.x - x).abs() < 300.0 && (e.y - y).abs() < 300.0);
-    let static_size = if view.radius_metres > 1500.0 { 4.0 } else if view.radius_metres > 500.0 { 6.0 } else { 8.0 };
+    let scale = marker_scale(view.radius_metres);
+    let static_size = if view.radius_metres > 1500.0 { 4.0 } else if view.radius_metres > 500.0 { 6.0 } else { 8.0 } * scale;
     let static_icons = view.radius_metres <= STATIC_ICON_RADIUS;
-    let static_marker = |x: f32, y: f32, color, icon: Option<&'static str>| match icon.filter(|_| static_icons) {
-        Some(icon) => Marker { x, y, color, size: STATIC_ICON_SIZE, live: false, level: 0, icon: Some(icon) },
-        None => Marker { x, y, color, size: static_size, live: false, level: 0, icon: None },
+    // `glyph`: a monster, drawn as the monster glyph when it has no icon
+    let static_marker = |x: f32, y: f32, color, icon: Option<&'static str>, glyph: bool| match (icon, glyph) {
+        _ if !static_icons => Marker { x, y, color, size: static_size, live: false, level: 0, icon: None, glyph: false },
+        (None, false) => Marker { x, y, color, size: static_size, live: false, level: 0, icon: None, glyph: false },
+        _ => Marker { x, y, color, size: STATIC_ICON_SIZE * scale, live: false, level: 0, icon, glyph: icon.is_none() },
     };
-    let live_marker = |x: f32, y: f32, color, size: f32, level: i32, icon: Option<&'static str>| Marker {
+    let live_marker = |x: f32, y: f32, color, size: f32, level: i32, icon: Option<&'static str>, glyph: bool| Marker {
         x,
         y,
         color,
-        size: if icon.is_some() { LIVE_ICON_SIZE } else { size },
+        size: if icon.is_some() || glyph { LIVE_ICON_SIZE } else { size } * scale,
         live: true,
         level,
         icon,
+        glyph: glyph && icon.is_none(),
     };
 
     let push = |m: Marker, out: &mut Vec<Marker>| {
@@ -438,7 +452,7 @@ pub fn markers(map: &MapInfo, view: &View, layer: &StaticLayer, live: &LiveInput
     for &(npc, x, y) in &layer.monsters {
         if in_view(x, y) {
             let color = layer.monster_colors.get(&npc).copied().unwrap_or((255, 255, 255));
-            push(static_marker(x, y, color, monster_icon(npc)), out);
+            push(static_marker(x, y, color, monster_icon(npc), true), out);
         }
     }
 
@@ -449,7 +463,7 @@ pub fn markers(map: &MapInfo, view: &View, layer: &StaticLayer, live: &LiveInput
         if near_player(x, y) && !live_env_matches(&item.key, x, y) {
             continue;
         }
-        push(static_marker(x, y, color, map_icons::gather(&item.kind)), out);
+        push(static_marker(x, y, color, map_icons::gather(&item.kind), false), out);
     }
 
     if live.known {
@@ -458,7 +472,7 @@ pub fn markers(map: &MapInfo, view: &View, layer: &StaticLayer, live: &LiveInput
             if wanted && in_view(e.x, e.y) {
                 let size = if e.kind == "Cube" { 14.0 } else { 11.0 };
                 let color = if e.kind == "Cube" { layer.cube_color_near(e.x, e.y).unwrap_or_else(|| gather_color("Cube")) } else { gather_color(&e.kind) };
-                push(live_marker(e.x, e.y, color, size, level_of(e.z, live.player_z), map_icons::gather(&e.kind)), out);
+                push(live_marker(e.x, e.y, color, size, level_of(e.z, live.player_z), map_icons::gather(&e.kind), false), out);
             }
         }
         for &LiveMob { npc, x, y, .. } in live.mobs {
@@ -466,12 +480,11 @@ pub fn markers(map: &MapInfo, view: &View, layer: &StaticLayer, live: &LiveInput
                 continue;
             }
             match layer.monster_colors.get(&npc) {
-                Some(&color) => push(live_marker(x, y, color, 13.0, 0, monster_icon(npc)), out),
+                Some(&color) => push(live_marker(x, y, color, 13.0, 0, monster_icon(npc), true), out),
                 None if live.show_live_mobs => {
-                    // the other monsters keep the game's small minimap marker, so the selected ones stand out
-                    let icon = rank_marker(npc);
-                    let marker = live_marker(x, y, (0xE0, 0x50, 0x50), 7.0, 0, icon);
-                    push(Marker { size: if icon.is_some() { STATIC_ICON_SIZE } else { 7.0 }, ..marker }, out);
+                    // the other monsters are drawn smaller in a ring of their rank colour, so the selected ones stand out
+                    let marker = live_marker(x, y, rank_color(npc), 0.0, 0, monster_icon(npc), true);
+                    push(Marker { size: STATIC_ICON_SIZE * scale, ..marker }, out);
                 }
                 None => {}
             }
@@ -529,6 +542,15 @@ mod tests {
         assert_eq!(level_of(26_400.0, Some(26_000.0)), 0);
         assert_eq!(level_of(f32::NAN, Some(26_000.0)), 0);
         assert_eq!(level_of(27_000.0, None), 0);
+    }
+
+    #[test]
+    fn markers_grow_with_zoom() {
+        assert_eq!(marker_scale(MARKER_REF_RADIUS), 1.0);
+        assert!(marker_scale(50.0) > marker_scale(100.0) && marker_scale(100.0) > 1.0);
+        assert!(marker_scale(1000.0) < 1.0);
+        assert_eq!(marker_scale(1.0), 2.5);
+        assert_eq!(marker_scale(8000.0), 0.6);
     }
 
     #[test]

@@ -14,7 +14,7 @@ import os
 import re
 import sys
 
-from PIL import Image
+from PIL import Image, ImageChops, ImageDraw
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import legacy_texture  # noqa: E402
@@ -29,6 +29,8 @@ GATHER = {
     "Gemstone": "GatherSkill_Jewelry_01",
     "Fragment": "Icon_BMShop_Express_EmpyreanTrace_001",
 }
+# skill icons drawn on an opaque square backdrop: made round and see-through like the Icon_Gather_ ones
+ROUND = {"Gemstone"}
 CUBE = "P_Img_HiddenCube_01"
 # minimap markers of hostile monsters (the game tints the plain ones; these are already red)
 MARKERS = {"mob": "Monster_Aggressive", "elite": "Monster_Elite_Aggressive", "boss": "Monster_Boss_Aggressive"}
@@ -45,6 +47,19 @@ def index_textures(root):
     return found
 
 
+def roundify(image):
+    """The dark backdrop becomes transparent (the glow keeps its brightness as opacity), cut to the inscribed circle."""
+    image = image.convert("RGBA")
+    big = image.width * 4
+    mask = Image.new("L", (big, big), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, big - 1, big - 1), fill=255)
+    mask = mask.resize(image.size, Image.LANCZOS)
+    r, g, b = image.convert("RGB").split()
+    bright = ImageChops.lighter(ImageChops.lighter(r, g), b).point(lambda v: min(255, max(0, (v - 40) * 2)))
+    image.putalpha(ImageChops.multiply(ImageChops.multiply(image.getchannel("A"), bright), mask))
+    return image
+
+
 def save(image, path, size):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     image.resize((size, size), Image.LANCZOS).save(path, optimize=True)
@@ -57,7 +72,8 @@ def main():
 
     for kind, name in GATHER.items():
         if name in textures:
-            save(legacy_texture.decode(textures[name]), f"{assets}/map/icons/{kind.lower()}.png", ICON_SIZE)
+            image = legacy_texture.decode(textures[name])
+            save(roundify(image) if kind in ROUND else image, f"{assets}/map/icons/{kind.lower()}.png", ICON_SIZE)
             index["gather"][kind] = f"map/icons/{kind.lower()}.png"
     if CUBE in textures:
         save(legacy_texture.decode(textures[CUBE]), f"{assets}/map/icons/cube.png", ICON_SIZE)
