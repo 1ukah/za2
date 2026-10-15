@@ -1,4 +1,4 @@
-# za2
+# za2 - zodiak for Aion 2
 
 <p align="center">
   <img width="96" height="96" alt="za2 icon" src="za2/ui/brand/icon.png" />
