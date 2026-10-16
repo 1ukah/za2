@@ -16,8 +16,9 @@ use za2_core::entities::{EntityDirectory, EnvObject, LiveMob};
 use za2_core::position::{PositionTracker, TrackedPosition};
 use za2_core::protocol::Protocol;
 use za2_core::recording;
-use za2_core::segment::{now_micros, Micros, TcpSegment};
+use za2_core::segment::{now_micros, Micros, TcpSegment, SECOND};
 use za2_core::sessions::{self, SessionSummary};
+use za2_core::ttk::TtkEstimator;
 
 use crate::memory::{self, MemoryLink};
 
@@ -26,6 +27,8 @@ const PUBLISH_INTERVAL: Duration = Duration::from_millis(250);
 /// While the memory reader delivers positions, the map follows them at the UI's refresh rate.
 const PUBLISH_INTERVAL_MEMORY: Duration = Duration::from_millis(100);
 const RESTART_DELAY: Duration = Duration::from_secs(5);
+/// The client pings every ten seconds: a reading older than this means the connection is gone.
+const PING_STALE: Micros = 30 * SECOND;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CaptureState {
@@ -97,6 +100,10 @@ pub struct Snapshot {
     /// Skill breakdown of each selected player (the meter's and the overlays' selections).
     pub skills: HashMap<i32, Vec<SkillUsage>>,
     pub target: Option<(String, i64, i64)>,
+    /// Round trip to the game server (ms).
+    pub ping: Option<i64>,
+    /// Estimated time until the local player's target dies (seconds).
+    pub time_to_kill: Option<f64>,
     pub character: Option<String>,
     pub sessions: Arc<Vec<SessionSummary>>,
     pub recording: Option<(PathBuf, u64)>,
@@ -126,6 +133,8 @@ impl Default for Snapshot {
             live_env: Vec::new(),
             skills: HashMap::new(),
             target: None,
+            ping: None,
+            time_to_kill: None,
             character: None,
             sessions: Arc::new(Vec::new()),
             recording: None,
@@ -256,6 +265,7 @@ struct Worker {
     sessions_changed: bool,
     engine: Engine,
     tracker: PositionTracker,
+    ttk: TtkEstimator,
     snapshot: Snapshot,
     selected: Vec<i32>,
     replay: bool,
@@ -348,6 +358,8 @@ impl Worker {
             let hp = entities.hit_points.latest(id)?.hp;
             Some((name, hp, entities.hit_points.max_of(id).unwrap_or(hp)))
         });
+        s.ping = engine.ping.current().filter(|(_, at)| now - at < PING_STALE).map(|(ms, _)| ms);
+        s.time_to_kill = time_to_kill(&mut self.ttk, engine, now);
         s.faction = entities.local_character().and_then(|c| match c.server_id / 1000 {
             1 => Some("Elyos"),
             2 => Some("Asmodian"),
@@ -424,11 +436,15 @@ fn run(source: Source, own_name: String, reset_on_zone: bool, shared: Arc<Shared
     let calibrated = protocol.calibrated;
     let mut engine = Engine::new(protocol);
     engine.reset_on_zone_change = reset_on_zone;
+    if matches!(source, Source::Live { .. }) {
+        engine.ping.set_perf_clock(za2_core::ping::perf_clock());
+    }
     engine.decoder.entities.set_configured_local_name(Some(&own_name));
     let queue_dropped = Arc::new(AtomicU64::new(0));
     let mut worker = Worker {
         engine,
         tracker: PositionTracker::new(),
+        ttk: TtkEstimator::new(),
         snapshot: Snapshot::default(),
         selected: Vec::new(),
         replay: matches!(source, Source::Replay { .. }),
@@ -575,6 +591,21 @@ fn handle(worker: &mut Worker, input: Input, child: &mut Option<Child>, restart_
             worker.dirty = true;
         }
     }
+}
+
+/// Seconds until the local player's target dies, from the predicted length of the current fight.
+fn time_to_kill(ttk: &mut TtkEstimator, engine: &Engine, now: Micros) -> Option<f64> {
+    let entities = &engine.decoder.entities;
+    let target = entities.local_hit_target().filter(|t| now - t.1 < 60 * SECOND).map(|t| t.0);
+    let (Some(id), Some(start)) = (target, engine.fight.started_at) else {
+        ttk.reset(None);
+        return None;
+    };
+    let sample = entities.hit_points.latest(id)?;
+    let max = entities.hit_points.max_of(id)?;
+    let total_ms = ttk.update(id, (sample.at - start) as f64 / 1000.0, sample.hp, max)?;
+    let elapsed_ms = (now - start) as f64 / 1000.0;
+    Some(((total_ms - elapsed_ms) / 1000.0).max(0.0))
 }
 
 fn log_seconds(log: &CombatLog) -> f64 {

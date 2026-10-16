@@ -6,6 +6,7 @@ use crate::segment::SECOND;
 /// A pause in combat this long ends a fight; the next hit starts a new one.
 pub const FIGHT_GAP: crate::segment::Micros = 10 * SECOND;
 use crate::decoder::{DamageEvent, FrameDecoder, ZoneChange};
+use crate::ping::PingTracker;
 use crate::protocol::Protocol;
 use crate::reassembler::TcpReassembler;
 use crate::segment::{Micros, TcpSegment};
@@ -15,6 +16,7 @@ pub struct Engine {
     protocol: Arc<Protocol>,
     pub reassembler: TcpReassembler,
     pub decoder: FrameDecoder,
+    pub ping: PingTracker,
     /// Everything since the zone was entered or the meter reset (a whole dungeon run).
     pub combat: CombatLog,
     /// The current fight: starts over when combat resumes after a pause of more than `FIGHT_GAP`.
@@ -37,6 +39,7 @@ impl Engine {
             protocol: protocol.clone(),
             reassembler: TcpReassembler::new(),
             decoder: FrameDecoder::new(protocol),
+            ping: PingTracker::new(),
             combat: CombatLog::new(),
             fight: CombatLog::new(),
             segments: 0,
@@ -54,15 +57,20 @@ impl Engine {
     pub fn ingest(&mut self, segment: &TcpSegment) {
         self.scratch.clear();
         if !segment.from_server {
+            self.ping.on_client_payload(&segment.payload, segment.timestamp);
             return;
         }
         self.segments += 1;
         self.last_segment_at = Some(segment.timestamp);
         self.session_start.get_or_insert(segment.timestamp);
         let decoder = &mut self.decoder;
+        let ping = &mut self.ping;
         let scratch = &mut self.scratch;
         let protocol = &self.protocol;
-        self.reassembler.push(segment, &protocol.frame, &protocol.sync_opcodes, &mut |frame| decoder.decode(frame, segment.timestamp, scratch));
+        self.reassembler.push(segment, &protocol.frame, &protocol.sync_opcodes, &mut |frame| {
+            ping.on_server_frame(frame, segment.timestamp);
+            decoder.decode(frame, segment.timestamp, scratch)
+        });
         self.events += self.scratch.len() as u64;
 
         for change in self.decoder.drain_zone_changes() {

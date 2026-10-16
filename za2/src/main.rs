@@ -128,6 +128,23 @@ fn duration_text(seconds: f64) -> String {
     format!("{}:{:02}", s / 60, s % 60)
 }
 
+/// The time to kill of the own target, as "TTK 1:23"; empty when there is no estimate.
+fn ttk_text(s: &worker::Snapshot) -> String {
+    s.time_to_kill.map(|t| format!("TTK {}", duration_text(t.ceil()))).unwrap_or_default()
+}
+
+/// The ping as "42ms" and its colour (as A2Tools grades it); empty when unknown.
+fn ping_text(s: &worker::Snapshot) -> (String, Color) {
+    let Some(ms) = s.ping else { return (String::new(), Color::default()) };
+    let color = match ms {
+        ..100 => Color::from_rgb_u8(0x68, 0xcb, 0xa4),
+        ..200 => Color::from_rgb_u8(0xf2, 0xb9, 0x4f),
+        ..225 => Color::from_rgb_u8(0xf2, 0x7a, 0x3a),
+        _ => Color::from_rgb_u8(0xe0, 0x6b, 0x6b),
+    };
+    (format!("{ms}ms"), color)
+}
+
 fn state_color(state: PositionState) -> Color {
     match state {
         PositionState::Exact => Color::from_rgb_u8(0x68, 0xcb, 0xa4),
@@ -303,6 +320,10 @@ fn sync_overlays(app: &App, ui: &mut Ui) {
 /// What one overlay shows: damage or healing of the fight or the total, most first.
 fn apply_overlay(o: &OverlayWindow, cfg: &settings::OverlayConfig, ui: &Ui) {
     let s = &ui.snapshot;
+    let (ping, ping_color) = ping_text(s);
+    o.window.set_ttk_text(ttk_text(s).into());
+    o.window.set_ping_text(ping.into());
+    o.window.set_ping_color(ping_color);
     let (rows, seconds) = if cfg.range == 0 { (&s.fight_rows, s.fight_seconds) } else { (&s.rows, s.encounter_seconds) };
     let healing = cfg.metric == 1;
     let value = |r: &worker::Row| if healing { r.heal } else { r.damage };
@@ -352,11 +373,12 @@ fn apply_overlay(o: &OverlayWindow, cfg: &settings::OverlayConfig, ui: &Ui) {
     }
 }
 
-/// How many players fit in an overlay: its height less the header and padding, 24px + 4px per row. With a player's
+/// How many players fit in an overlay: its height less the header, footer and padding, 24px + 4px per row. With a player's
 /// skills open, at most 5 rows stay so the skills have room.
 fn overlay_row_capacity(o: &OverlayWindow) -> usize {
     let height = logical_size(o.window.window()).1;
-    let fit = (((height - 8.0 * 2.0 - 20.0) / 28.0).floor() as usize).max(1);
+    let footer = if o.window.get_ttk_text().is_empty() && o.window.get_ping_text().is_empty() { 0.0 } else { 16.0 + 4.0 };
+    let fit = (((height - 8.0 * 2.0 - 20.0 - footer) / 28.0).floor() as usize).max(1);
     if ui_selected(o) { fit.min(5) } else { fit }
 }
 
@@ -607,6 +629,10 @@ fn apply_meter(app: &App, ui: &Ui) {
     app.set_encounter_time(duration_text(seconds).into());
     app.set_encounter_total(format!("{} total", compact(total)).into());
     app.set_encounter_info(info.into());
+    let (ping, ping_color) = ping_text(s);
+    app.set_ttk_text(if history.is_none() { ttk_text(s) } else { String::new() }.into());
+    app.set_ping_text(ping.into());
+    app.set_ping_color(ping_color);
 
     if history.is_some() {
         sync_model(&ui.models.skills, Vec::new());
