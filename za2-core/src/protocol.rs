@@ -73,6 +73,7 @@ pub enum OpcodeFamily {
     Nickname,
     Roster,
     Character,
+    SelfStats,
     Equipment,
     Skills,
     Daevanion,
@@ -105,7 +106,7 @@ impl OpcodeFamily {
     fn parse(name: &str) -> Option<Self> {
         use OpcodeFamily::*;
         let all = [
-            Damage, Dot, Heal, HpUpdate, Nickname, Roster, Character, Equipment, Skills, Daevanion, Species, PetProgress, PetLevel,
+            Damage, Dot, Heal, HpUpdate, Nickname, Roster, Character, SelfStats, Equipment, Skills, Daevanion, Species, PetProgress, PetLevel,
             PetAdded, InventoryChange, TargetSelect, LocalPosition, Titles, TitleChange, Attributes, Stigmas, SkillBar, Inspect,
             Appearance, PlayerList, Session, Kill, Avoid, NpcSpawn, NpcRemove, EnvSpawn, EnvRemove, Zone,
         ];

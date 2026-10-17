@@ -12,6 +12,7 @@ export struct MeterRow {
     share: float,
     share-text: string,
     heal: string,
+    taken: string,
     crit: string,
     local: bool,
     estimated: bool,
@@ -48,7 +49,49 @@ export struct SkillRow {
     hits: string,
     crit: string,
     share: float,
-    min-max: string,
+    // min - max, rate, hit kinds and ticks: "1.2k - 8.4k  ·  950/s  ·  back 32%"
+    detail: string,
+}
+
+// One player's line on the DPS chart: path commands in the chart's pixels, and the value at the cursor (or the average).
+export struct ChartLine {
+    id: int,
+    commands: string,
+    color: color,
+    name: string,
+    value: string,
+    local: bool,
+}
+
+// A death on the chart, at `x` (0..1 of the width).
+export struct ChartMark {
+    x: float,
+    label: string,
+}
+
+// One stretch an effect was on, from `x` for `w` (0..1 of the timeline).
+export struct BuffBar {
+    x: float,
+    w: float,
+}
+
+// An effect on the timeline: its icon, name, uptime, how often it went on, and when it was on.
+export struct BuffLane {
+    icon: image,
+    name: string,
+    uptime: string,
+    count: string,
+    own: bool,
+    bars: [BuffBar],
+}
+
+// A field boss of the shown map: its state ("Up", "Back in 1:23:45"), a detail, and where it is.
+export struct BossRow {
+    name: string,
+    status: string,
+    detail: string,
+    color: color,
+    index: int,
 }
 
 export struct MapTile {
@@ -125,6 +168,7 @@ global Icons {
     out property <string> chevron-down: "M6 9 l6 6 6-6";
     out property <string> chevron-right: "M9 18 l6-6-6-6";
     // a monster without a portrait
+    out property <string> chart-line: "M3 3v16a2 2 0 0 0 2 2h16 M19 9l-5 5-4-4-3 3";
     out property <string> skull: "M16 20a2 2 0 0 0 1.56-3.25 8 8 0 1 0-12.12 0A2 2 0 0 0 8 20 Z M8 20v2h8v-2 M12.5 17l-.5-1-.5 1h1z M 8 12 A 1 1 0 1 0 10 12 A 1 1 0 1 0 8 12 Z M 14 12 A 1 1 0 1 0 16 12 A 1 1 0 1 0 14 12 Z";
     out property <string> copy: "M 10 8 H 20 A 2 2 0 0 1 22 10 V 20 A 2 2 0 0 1 20 22 H 10 A 2 2 0 0 1 8 20 V 10 A 2 2 0 0 1 10 8 Z M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2";
     out property <string> history: "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8 M3 3v5h5 M12 7v5l4 2";
@@ -805,6 +849,8 @@ component MapView inherits Rectangle {
     in property <float> me-heading;
     in property <color> me-color;
     in property <string> me-label;
+    // radius of the Hidden Cube radar circle around the player; 0: hidden
+    in property <length> radar-radius;
     in property <bool> interactive: true;
     in property <bool> wheel-zoom: interactive;
     out property <length> view-width: self.width;
@@ -875,6 +921,17 @@ component MapView inherits Rectangle {
             stroke: #000000;
             stroke-width: 1px;
         }
+    }
+
+    if me-visible && radar-radius > 0: Rectangle {
+        x: me-x - radar-radius;
+        y: me-y - radar-radius;
+        width: radar-radius * 2;
+        height: radar-radius * 2;
+        border-radius: radar-radius;
+        background: #ffd84d14;
+        border-width: 2px;
+        border-color: #ffd84dcc;
     }
 
     if me-visible: Rectangle {
@@ -1045,16 +1102,23 @@ component RowBar inherits Rectangle {
             horizontal-alignment: right;
             width: 64px;
         }
+        if !compact: Text {
+            text: data.taken;
+            color: Theme.danger;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+            width: 64px;
+        }
     }
 }
 
 // ---------------------------------------------------------------- overlays
 
-// One skill of the breakdown: icon, name, total, hits, crit, on a bar as wide as its share.
+// One skill of the breakdown: icon, name, total, hits, crit, on a bar as wide as its share; the full size adds the detail line.
 component SkillBar inherits Rectangle {
     in property <SkillRow> data;
     in property <bool> compact;
-    height: compact ? 22px : 26px;
+    height: compact ? 22px : 38px;
     border-radius: compact ? 5px : 6px;
     clip: true;
     background: compact ? #ffffff08 : Theme.surface-raised;
@@ -1068,7 +1132,12 @@ component SkillBar inherits Rectangle {
         padding-right: 8px;
         spacing: compact ? 6px : 8px;
         ClassIcon { source: root.data.icon; size: compact ? 18px : 22px; }
-        Text { text: root.data.name; color: Theme.text; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            Text { text: root.data.name; color: Theme.text; overflow: elide; }
+            if !compact && root.data.detail != "": Text { text: root.data.detail; color: Theme.faint; font-size: 11px; overflow: elide; }
+        }
         Text { text: root.data.total; color: Theme.text; font-weight: 600; width: compact ? 48px : 64px; horizontal-alignment: right; vertical-alignment: center; }
         Text { text: root.data.hits; color: Theme.muted; width: compact ? 28px : 36px; horizontal-alignment: right; vertical-alignment: center; }
         Text { text: root.data.crit; color: Theme.muted; width: compact ? 32px : 40px; horizontal-alignment: right; vertical-alignment: center; }
@@ -1277,6 +1346,8 @@ export component MapOverlay inherits Window {
     in property <float> me-heading;
     in property <color> me-color;
     in property <string> me-label;
+    // radius of the Hidden Cube radar circle around the player; 0: hidden
+    in property <length> radar-radius;
     in property <bool> locked;
     in property <float> overlay-opacity: 0.85;
     out property <length> view-width: map.view-width;
@@ -1318,6 +1389,7 @@ export component MapOverlay inherits Window {
             me-heading: root.me-heading;
             me-color: root.me-color;
             me-label: root.me-label;
+            radar-radius: root.radar-radius;
             interactive: false;
             wheel-zoom: false;
         }
@@ -1434,6 +1506,35 @@ export component App inherits Window {
     in property <[MeterRow]> rows;
     in property <[SkillRow]> skills;
     in property <string> skills-title;
+    // the skill card shows 0 damage dealt, 1 healing, 2 damage taken
+    in-out property <int> skill-mode: 0;
+    callback skill-mode-changed(int);
+
+    // timeline tab: the DPS chart of the shown players, deaths, and the effects on the selected player or their target
+    in property <[ChartLine]> chart-lines;
+    in property <[ChartMark]> chart-marks;
+    in property <string> chart-top;
+    in property <string> chart-duration;
+    in property <string> chart-cursor-time;
+    in property <string> chart-empty;
+    in-out property <length> chart-width;
+    in-out property <length> chart-height;
+    // where the mouse is over the chart (0..1), below 0 when it is not
+    in-out property <float> chart-cursor: -1;
+    callback chart-resized();
+    callback chart-hover(float);
+    in-out property <int> buff-mode: 0;
+    callback buff-mode-changed(int);
+    in property <string> buff-title;
+    in property <string> buff-empty;
+    in property <[BuffLane]> buff-lanes;
+
+    // field bosses of the shown map
+    in property <[BossRow]> boss-rows;
+    in property <string> boss-summary;
+    callback focus-boss(int);
+    // Odyle energy: "15 (+340)"; empty when unknown
+    in property <string> odyle-text;
     in-out property <int> selected-row: -1;
     in-out property <int> scope: 0;
     in property <[string]> session-names: ["Current"];
@@ -1458,6 +1559,8 @@ export component App inherits Window {
     in property <float> me-heading;
     in property <color> me-color;
     in property <string> me-label;
+    // radius of the Hidden Cube radar circle around the player; 0: hidden
+    in property <length> radar-radius;
     in property <string> position-text;
     in property <color> position-color;
     in property <[string]> map-names;
@@ -1644,6 +1747,7 @@ export component App inherits Window {
                                                 Text { text: root.encounter-total; color: Theme.muted; vertical-alignment: bottom; }
                                                 if root.ttk-text != "": Text { text: root.ttk-text; color: Theme.text; font-weight: 600; vertical-alignment: bottom; }
                                                 if root.ping-text != "": PingBadge { text: root.ping-text; tint: root.ping-color; }
+                                                if root.odyle-text != "": Text { text: "Odyle " + root.odyle-text; color: Theme.warn; font-size: 12px; vertical-alignment: bottom; }
                                             }
                                             Text { text: root.encounter-info; color: Theme.faint; font-size: 12px; overflow: elide; }
                                         }
@@ -1688,6 +1792,7 @@ export component App inherits Window {
                                         SectionTitle { text: "SHARE"; width: 40px; horizontal-alignment: right; }
                                         SectionTitle { text: "CRIT"; width: 44px; horizontal-alignment: right; }
                                         SectionTitle { text: "HEAL"; width: 64px; horizontal-alignment: right; }
+                                        SectionTitle { text: "TAKEN"; width: 64px; horizontal-alignment: right; }
                                     }
                                     ListView {
                                         for row[i] in root.rows: VerticalLayout {
@@ -1711,7 +1816,20 @@ export component App inherits Window {
                                     VerticalLayout {
                                         padding: 12px;
                                         spacing: 6px;
-                                        Label { text: root.skills-title; font-weight: 600; height: 22px; overflow: elide; }
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            height: 30px;
+                                            Label { text: root.skills-title; font-weight: 600; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
+                                            SegmentBar {
+                                                HorizontalLayout {
+                                                    padding: 3px;
+                                                    spacing: 2px;
+                                                    Segment { text: "Dealt"; active: root.skill-mode == 0; clicked => { root.skill-mode = 0; root.skill-mode-changed(0); } }
+                                                    Segment { text: "Healed"; active: root.skill-mode == 1; clicked => { root.skill-mode = 1; root.skill-mode-changed(1); } }
+                                                    Segment { text: "Taken"; active: root.skill-mode == 2; clicked => { root.skill-mode = 2; root.skill-mode-changed(2); } }
+                                                }
+                                            }
+                                        }
                                         HorizontalLayout {
                                             spacing: 8px;
                                             height: 16px;
@@ -1724,6 +1842,199 @@ export component App inherits Window {
                                             for s in root.skills: VerticalLayout {
                                                 padding-bottom: 3px;
                                                 SkillBar { data: s; }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // timeline
+                            if root.tab == 2: VerticalLayout {
+                                spacing: 10px;
+                                HorizontalLayout {
+                                    height: 48px;
+                                    spacing: 10px;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        spacing: 2px;
+                                        horizontal-stretch: 1;
+                                        HorizontalLayout {
+                                            spacing: 10px;
+                                            alignment: start;
+                                            Text { text: root.encounter-time; color: Theme.text; font-size: 22px; font-weight: 700; }
+                                            Text { text: root.encounter-total; color: Theme.muted; vertical-alignment: bottom; }
+                                        }
+                                        Text { text: root.encounter-info; color: Theme.faint; font-size: 12px; overflow: elide; }
+                                    }
+                                    SegmentBar {
+                                        y: (parent.height - self.height) / 2;
+                                        HorizontalLayout {
+                                            padding: 3px;
+                                            spacing: 2px;
+                                            Segment { text: "Fight"; active: root.meter-range == 0; clicked => { root.meter-range = 0; root.meter-range-changed(0); } }
+                                            Segment { text: "Total"; active: root.meter-range == 1; clicked => { root.meter-range = 1; root.meter-range-changed(1); } }
+                                        }
+                                    }
+                                    Dropdown {
+                                        y: (parent.height - self.height) / 2;
+                                        icon: Icons.history;
+                                        model: root.session-names;
+                                        current-index <=> root.session-index;
+                                        selected(i) => { root.session-selected(i); }
+                                        width: 240px;
+                                    }
+                                }
+                                Card {
+                                    vertical-stretch: 3;
+                                    VerticalLayout {
+                                        padding: 12px;
+                                        spacing: 8px;
+                                        HorizontalLayout {
+                                            spacing: 12px;
+                                            height: 20px;
+                                            Label { text: "DPS over time"; font-weight: 600; vertical-alignment: center; }
+                                            for line in root.chart-lines: HorizontalLayout {
+                                                spacing: 5px;
+                                                Rectangle { width: 10px; height: 3px; y: (parent.height - self.height) / 2; border-radius: 1.5px; background: line.color; }
+                                                Text {
+                                                    text: line.name + "  " + line.value;
+                                                    color: line.local ? Theme.accent : (root.selected-row == line.id ? Theme.text : Theme.muted);
+                                                    font-size: 11px;
+                                                    font-weight: root.selected-row == line.id ? 700 : 400;
+                                                    vertical-alignment: center;
+                                                    TouchArea { clicked => { root.select-row(line.id); } }
+                                                }
+                                            }
+                                            Rectangle { horizontal-stretch: 1; }
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 6px;
+                                            vertical-stretch: 1;
+                                            VerticalLayout {
+                                                width: 44px;
+                                                Muted { text: root.chart-top; font-size: 11px; horizontal-alignment: right; }
+                                                Rectangle { vertical-stretch: 1; }
+                                                Muted { text: "0"; font-size: 11px; horizontal-alignment: right; }
+                                            }
+                                            plot := Rectangle {
+                                                horizontal-stretch: 1;
+                                                clip: true;
+                                                init => { root.chart-width = self.width; root.chart-height = self.height; root.chart-resized(); }
+                                                changed width => { root.chart-width = self.width; root.chart-resized(); }
+                                                changed height => { root.chart-height = self.height; root.chart-resized(); }
+                                                for f in [0, 0.25, 0.5, 0.75, 1]: Rectangle {
+                                                    y: parent.height * f - (f == 1 ? 1px : 0);
+                                                    height: 1px;
+                                                    background: Theme.border;
+                                                }
+                                                for line in root.chart-lines: Path {
+                                                    x: 0;
+                                                    y: 0;
+                                                    width: parent.width;
+                                                    height: parent.height;
+                                                    viewbox-width: parent.width / 1px;
+                                                    viewbox-height: parent.height / 1px;
+                                                    commands: line.commands;
+                                                    stroke: line.color;
+                                                    stroke-width: line.local || root.selected-row == line.id ? 2.5px : 1.5px;
+                                                }
+                                                for m in root.chart-marks: Rectangle {
+                                                    x: parent.width * m.x - 1px;
+                                                    width: 2px;
+                                                    background: Theme.danger.with-alpha(0.7);
+                                                    Text {
+                                                        x: 4px;
+                                                        y: 2px;
+                                                        text: m.label;
+                                                        color: Theme.danger;
+                                                        font-size: 10px;
+                                                    }
+                                                }
+                                                if root.chart-cursor >= 0: Rectangle {
+                                                    x: parent.width * root.chart-cursor;
+                                                    width: 1px;
+                                                    background: Theme.muted;
+                                                }
+                                                if root.chart-empty != "": Muted {
+                                                    text: root.chart-empty;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                }
+                                                hover := TouchArea {
+                                                    moved => { root.chart-hover(self.mouse-x / self.width); }
+                                                    changed has-hover => { if (!self.has-hover) { root.chart-hover(-1); } }
+                                                }
+                                            }
+                                        }
+                                        HorizontalLayout {
+                                            padding-left: 50px;
+                                            height: 14px;
+                                            Muted { text: "0:00"; font-size: 11px; }
+                                            Muted { text: root.chart-cursor-time; font-size: 11px; horizontal-stretch: 1; horizontal-alignment: center; }
+                                            Muted { text: root.chart-duration; font-size: 11px; }
+                                        }
+                                    }
+                                }
+                                Card {
+                                    vertical-stretch: 2;
+                                    VerticalLayout {
+                                        padding: 12px;
+                                        spacing: 6px;
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            height: 30px;
+                                            Label { text: root.buff-title; font-weight: 600; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
+                                            SegmentBar {
+                                                HorizontalLayout {
+                                                    padding: 3px;
+                                                    spacing: 2px;
+                                                    Segment { text: "On player"; active: root.buff-mode == 0; clicked => { root.buff-mode = 0; root.buff-mode-changed(0); } }
+                                                    Segment { text: "On target"; active: root.buff-mode == 1; clicked => { root.buff-mode = 1; root.buff-mode-changed(1); } }
+                                                }
+                                            }
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            height: 16px;
+                                            SectionTitle { text: "EFFECT"; width: 190px; }
+                                            SectionTitle { text: "TIMELINE"; horizontal-stretch: 1; }
+                                            SectionTitle { text: "UPTIME"; width: 48px; horizontal-alignment: right; }
+                                            SectionTitle { text: "TIMES"; width: 40px; horizontal-alignment: right; }
+                                        }
+                                        if root.buff-lanes.length == 0: Muted {
+                                            text: root.buff-empty;
+                                            horizontal-alignment: center;
+                                            height: 40px;
+                                        }
+                                        ListView {
+                                            for lane in root.buff-lanes: HorizontalLayout {
+                                                spacing: 8px;
+                                                height: 26px;
+                                                padding-bottom: 3px;
+                                                HorizontalLayout {
+                                                    width: 190px;
+                                                    spacing: 6px;
+                                                    ClassIcon { source: lane.icon; size: 20px; }
+                                                    Text { text: lane.name; color: lane.own ? Theme.text : Theme.muted; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
+                                                }
+                                                Rectangle {
+                                                    horizontal-stretch: 1;
+                                                    border-radius: 4px;
+                                                    background: Theme.surface-raised;
+                                                    clip: true;
+                                                    for b in lane.bars: Rectangle {
+                                                        x: parent.width * b.x;
+                                                        width: max(1px, parent.width * b.w);
+                                                        background: (lane.own ? Theme.accent : Theme.green).with-alpha(0.55);
+                                                    }
+                                                    if root.chart-cursor >= 0: Rectangle {
+                                                        x: parent.width * root.chart-cursor;
+                                                        width: 1px;
+                                                        background: Theme.muted;
+                                                    }
+                                                }
+                                                Text { text: lane.uptime; color: Theme.text; width: 48px; horizontal-alignment: right; vertical-alignment: center; }
+                                                Text { text: lane.count; color: Theme.muted; width: 40px; horizontal-alignment: right; vertical-alignment: center; }
                                             }
                                         }
                                     }
@@ -1802,6 +2113,7 @@ export component App inherits Window {
                                             me-heading: root.me-heading;
                                             me-color: root.me-color;
                                             me-label: root.me-label;
+                                            radar-radius: root.radar-radius;
                                             pan-by(dx, dy) => { root.pan-by(dx, dy); }
                                             zoom-by(d, x, y) => { root.zoom-by(d, x, y); }
                                         }
@@ -1866,6 +2178,7 @@ export component App inherits Window {
                                                 spacing: 2px;
                                                 Segment { horizontal-stretch: 1; icon: Icons.pickaxe; active: root.filter-tab == 0; clicked => { root.filter-tab = 0; } }
                                                 Segment { horizontal-stretch: 1; icon: Icons.paw-print; active: root.filter-tab == 1; clicked => { root.filter-tab = 1; } }
+                                                Segment { horizontal-stretch: 1; icon: Icons.skull; active: root.filter-tab == 2; clicked => { root.filter-tab = 2; } }
                                             }
                                         }
                                         if root.filter-tab == 0: SearchField {
@@ -1878,7 +2191,34 @@ export component App inherits Window {
                                             text <=> root.monster-query;
                                             edited(t) => { root.monster-search(t); }
                                         }
-                                        HorizontalLayout {
+                                        if root.filter-tab == 2: VerticalLayout {
+                                            vertical-stretch: 1;
+                                            spacing: 6px;
+                                            Muted { text: root.boss-summary; font-size: 11px; wrap: word-wrap; }
+                                            ListView {
+                                                vertical-stretch: 1;
+                                                for b in root.boss-rows: Rectangle {
+                                                    height: 40px;
+                                                    border-radius: 6px;
+                                                    background: boss-touch.has-hover ? Theme.surface-hover : transparent;
+                                                    boss-touch := TouchArea { clicked => { root.focus-boss(b.index); } }
+                                                    HorizontalLayout {
+                                                        padding-left: 8px;
+                                                        padding-right: 8px;
+                                                        spacing: 8px;
+                                                        Rectangle { width: 8px; height: 8px; y: (parent.height - self.height) / 2; border-radius: 4px; background: b.color; }
+                                                        VerticalLayout {
+                                                            alignment: center;
+                                                            horizontal-stretch: 1;
+                                                            Text { text: b.name; color: Theme.text; overflow: elide; }
+                                                            if b.detail != "": Text { text: b.detail; color: Theme.faint; font-size: 11px; overflow: elide; }
+                                                        }
+                                                        Text { text: b.status; color: b.color; font-weight: 600; vertical-alignment: center; }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if root.filter-tab != 2: HorizontalLayout {
                                             height: 22px;
                                             spacing: 10px;
                                             padding-left: 4px;
@@ -2015,6 +2355,7 @@ export component App inherits Window {
                                 alignment: start;
                                 HorizontalLayout { alignment: center; RailButton { icon: Icons.swords; tooltip: "Meter"; active: root.tab == 0; clicked => { root.tab = 0; } } }
                                 HorizontalLayout { alignment: center; RailButton { icon: Icons.map; tooltip: "Map"; active: root.tab == 1; clicked => { root.tab = 1; } } }
+                                HorizontalLayout { alignment: center; RailButton { icon: Icons.chart-line; tooltip: "Timeline"; active: root.tab == 2; clicked => { root.tab = 2; root.chart-resized(); } } }
                             }
                             VerticalLayout {
                                 y: parent.height - self.preferred-height;

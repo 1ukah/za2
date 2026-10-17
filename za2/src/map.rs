@@ -12,7 +12,9 @@ const TILE_MIN_SIZE: u32 = 128;
 const TILE_CACHE_BYTES: usize = 192 << 20;
 const TILE_THREADS: usize = 2;
 const MAX_MARKERS: usize = 4000;
-const ANNOUNCE_RANGE: f32 = 4000.0;
+const ANNOUNCE_RANGE: f32 = 12_000.0;
+/// Range of the Hidden Cube radar circle around the player (world units).
+pub const CUBE_RADAR_RANGE: f64 = 12_000.0;
 /// A live object this much higher or lower than the player gets an arrow (5 m).
 const LEVEL_DIFFERENCE: f32 = 500.0;
 
@@ -262,16 +264,38 @@ pub struct Marker {
     pub glyph: bool,
 }
 
-/// Live things with an icon are drawn this big, static places from this zoom on (radius in metres).
-const LIVE_ICON_SIZE: f32 = 22.0;
-const STATIC_ICON_SIZE: f32 = 16.0;
-const STATIC_ICON_RADIUS: f64 = 500.0;
-/// Markers have their base size at this zoom (radius in metres) and grow or shrink with the square root of the zoom.
-const MARKER_REF_RADIUS: f64 = 250.0;
+/// How big a kind of marker is drawn: `base` pixels across at `MARKER_REF_RADIUS`, growing when zoomed in and shrinking
+/// when zoomed out, but gently, and never outside `min`..`max`, so markers stay visible at every zoom without crowding.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MarkerSize {
+    pub base: f32,
+    pub min: f32,
+    pub max: f32,
+}
 
-/// How much bigger than their base size markers are drawn at this zoom.
-pub fn marker_scale(radius_metres: f64) -> f32 {
-    (MARKER_REF_RADIUS / radius_metres.max(1.0)).sqrt().clamp(0.6, 2.5) as f32
+/// Live monsters picked in the monster list and live things with an icon.
+pub const LIVE_ICON: MarkerSize = MarkerSize { base: 24.0, min: 20.0, max: 40.0 };
+/// The other live monsters: smaller, so the picked ones stand out.
+pub const LIVE_OTHER: MarkerSize = MarkerSize { base: 18.0, min: 14.0, max: 30.0 };
+/// Live things without an icon.
+pub const LIVE_DOT: MarkerSize = MarkerSize { base: 13.0, min: 10.0, max: 20.0 };
+/// Spawn places and gathering spots with their icon.
+pub const STATIC_ICON: MarkerSize = MarkerSize { base: 18.0, min: 13.0, max: 32.0 };
+/// Spawn places and gathering spots as a dot: when zoomed far out (so hundreds of icons do not cover the map) or without icon.
+pub const STATIC_DOT: MarkerSize = MarkerSize { base: 10.0, min: 8.0, max: 14.0 };
+/// Static places are drawn as icons up to this zoom (radius in metres), as dots beyond.
+const STATIC_ICON_RADIUS: f64 = 1500.0;
+/// Markers have their base size at this zoom (radius in metres).
+const MARKER_REF_RADIUS: f64 = 250.0;
+/// How strongly the size follows the zoom: 0 not at all, 1 like the map itself.
+const MARKER_ZOOM_FOLLOW: f64 = 0.3;
+
+impl MarkerSize {
+    /// The diameter in pixels at this zoom (radius in metres).
+    pub fn at(self, radius_metres: f64) -> f32 {
+        let factor = (MARKER_REF_RADIUS / radius_metres.max(1.0)).powf(MARKER_ZOOM_FOLLOW) as f32;
+        (self.base * factor).clamp(self.min, self.max)
+    }
 }
 
 /// Whether something at height `z` is clearly above (1) or below (-1) the player.
@@ -422,20 +446,20 @@ pub fn markers(map: &MapInfo, view: &View, layer: &StaticLayer, live: &LiveInput
         live.known && dx.abs() < ANNOUNCE_RANGE && dy.abs() < ANNOUNCE_RANGE && dx * dx + dy * dy < ANNOUNCE_RANGE * ANNOUNCE_RANGE
     };
     let live_env_matches = |key: &str, x: f32, y: f32| live.env.iter().any(|e| e.key == key && (e.x - x).abs() < 300.0 && (e.y - y).abs() < 300.0);
-    let scale = marker_scale(view.radius_metres);
-    let static_size = if view.radius_metres > 1500.0 { 4.0 } else if view.radius_metres > 500.0 { 6.0 } else { 8.0 } * scale;
-    let static_icons = view.radius_metres <= STATIC_ICON_RADIUS;
+    let radius = view.radius_metres;
+    let static_icons = radius <= STATIC_ICON_RADIUS;
+    let static_dot = STATIC_DOT.at(radius);
     // `glyph`: a monster, drawn as the monster glyph when it has no icon
     let static_marker = |x: f32, y: f32, color, icon: Option<&'static str>, glyph: bool| match (icon, glyph) {
-        _ if !static_icons => Marker { x, y, color, size: static_size, live: false, level: 0, icon: None, glyph: false },
-        (None, false) => Marker { x, y, color, size: static_size, live: false, level: 0, icon: None, glyph: false },
-        _ => Marker { x, y, color, size: STATIC_ICON_SIZE * scale, live: false, level: 0, icon, glyph: icon.is_none() },
+        _ if !static_icons => Marker { x, y, color, size: static_dot, live: false, level: 0, icon: None, glyph: false },
+        (None, false) => Marker { x, y, color, size: static_dot, live: false, level: 0, icon: None, glyph: false },
+        _ => Marker { x, y, color, size: STATIC_ICON.at(radius), live: false, level: 0, icon, glyph: icon.is_none() },
     };
-    let live_marker = |x: f32, y: f32, color, size: f32, level: i32, icon: Option<&'static str>, glyph: bool| Marker {
+    let live_marker = |x: f32, y: f32, color, level: i32, icon: Option<&'static str>, glyph: bool| Marker {
         x,
         y,
         color,
-        size: if icon.is_some() || glyph { LIVE_ICON_SIZE } else { size } * scale,
+        size: if icon.is_some() || glyph { LIVE_ICON } else { LIVE_DOT }.at(radius),
         live: true,
         level,
         icon,
@@ -470,9 +494,8 @@ pub fn markers(map: &MapInfo, view: &View, layer: &StaticLayer, live: &LiveInput
         for e in live.env {
             let wanted = if e.kind == "Cube" { live.show_cubes } else { layer.gather.iter().any(|g| g.0.key == e.key) };
             if wanted && in_view(e.x, e.y) {
-                let size = if e.kind == "Cube" { 14.0 } else { 11.0 };
                 let color = if e.kind == "Cube" { layer.cube_color_near(e.x, e.y).unwrap_or_else(|| gather_color("Cube")) } else { gather_color(&e.kind) };
-                push(live_marker(e.x, e.y, color, size, level_of(e.z, live.player_z), map_icons::gather(&e.kind), false), out);
+                push(live_marker(e.x, e.y, color, level_of(e.z, live.player_z), map_icons::gather(&e.kind), false), out);
             }
         }
         for &LiveMob { npc, x, y, .. } in live.mobs {
@@ -480,11 +503,11 @@ pub fn markers(map: &MapInfo, view: &View, layer: &StaticLayer, live: &LiveInput
                 continue;
             }
             match layer.monster_colors.get(&npc) {
-                Some(&color) => push(live_marker(x, y, color, 13.0, 0, monster_icon(npc), true), out),
+                Some(&color) => push(live_marker(x, y, color, 0, monster_icon(npc), true), out),
                 None if live.show_live_mobs => {
                     // the other monsters are drawn smaller in a ring of their rank colour, so the selected ones stand out
-                    let marker = live_marker(x, y, rank_color(npc), 0.0, 0, monster_icon(npc), true);
-                    push(Marker { size: STATIC_ICON_SIZE * scale, ..marker }, out);
+                    let marker = live_marker(x, y, rank_color(npc), 0, monster_icon(npc), true);
+                    push(Marker { size: LIVE_OTHER.at(radius), ..marker }, out);
                 }
                 None => {}
             }
@@ -545,12 +568,19 @@ mod tests {
     }
 
     #[test]
-    fn markers_grow_with_zoom() {
-        assert_eq!(marker_scale(MARKER_REF_RADIUS), 1.0);
-        assert!(marker_scale(50.0) > marker_scale(100.0) && marker_scale(100.0) > 1.0);
-        assert!(marker_scale(1000.0) < 1.0);
-        assert_eq!(marker_scale(1.0), 2.5);
-        assert_eq!(marker_scale(8000.0), 0.6);
+    fn markers_follow_the_zoom_within_bounds() {
+        for kind in [LIVE_ICON, LIVE_OTHER, LIVE_DOT, STATIC_ICON, STATIC_DOT] {
+            assert_eq!(kind.at(MARKER_REF_RADIUS), kind.base);
+            assert!(kind.at(50.0) > kind.at(100.0) && kind.at(100.0) > kind.base);
+            assert!(kind.at(1000.0) < kind.base);
+            // the map zooms from 25 m to 8 km: never smaller than the minimum, never bigger than the maximum
+            assert_eq!(kind.at(8000.0), kind.min);
+            assert!(kind.at(25.0) <= kind.max);
+        }
+        // picked monsters stay bigger than the others at every zoom
+        for radius in [25.0, 100.0, 250.0, 1000.0, 8000.0] {
+            assert!(LIVE_ICON.at(radius) > LIVE_OTHER.at(radius));
+        }
     }
 
     #[test]

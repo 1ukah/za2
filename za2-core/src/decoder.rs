@@ -8,14 +8,18 @@ use crate::protocol::{OpcodeFamily, Protocol};
 use crate::segment::{Micros, SECOND};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub struct HitKinds(pub u8);
+pub struct HitKinds(pub u16);
 
 impl HitKinds {
-    pub const PARRY: u8 = 1;
-    pub const PERFECT: u8 = 2;
-    pub const DOUBLE: u8 = 4;
-    pub const BACK: u8 = 8;
-    pub const FRONT: u8 = 16;
+    pub const PARRY: u16 = 1;
+    pub const PERFECT: u16 = 2;
+    pub const DOUBLE: u16 = 4;
+    pub const BACK: u16 = 8;
+    pub const FRONT: u16 = 16;
+    pub const BLOCK: u16 = 32;
+    pub const PERFECT_BLOCK: u16 = 64;
+    pub const IRON_WALL: u16 = 128;
+    pub const REGENERATION: u16 = 256;
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -67,6 +71,56 @@ pub struct AvoidEvent {
     pub target: i32,
 }
 
+/// What a buff record says: an effect (abnormal) put on, changed or taken off an entity.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BuffChange {
+    On,
+    /// `restarted`: the change re-applied the effect, which starts its timer over.
+    Changed { restarted: bool },
+    /// Reason 1: ran out; 11: taken off by a skill; 5: a passive replaced by its next level.
+    Off { reason: u8 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BuffEvent {
+    pub timestamp: Micros,
+    pub target: i32,
+    /// Numbered per target; every stack is an instance of its own.
+    pub instance: i64,
+    /// The effect (0 for `Off`, which names only the instance).
+    pub abnormal: u32,
+    pub caster: i32,
+    pub skill: Option<u32>,
+    /// Duration (ms; -1 endless) and end (server unix ms).
+    pub length_ms: i64,
+    pub end_ms: i64,
+    pub change: BuffChange,
+}
+
+/// An entity left the world: died (`died`) or despawned.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Departure {
+    pub timestamp: Micros,
+    pub entity: i32,
+    pub died: bool,
+}
+
+/// One field boss of a map report (sent when the player opens the map): up since `time_ms`, or back at `time_ms`
+/// (server unix ms; 0: the game gives no time).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FieldBossSighting {
+    pub boss: u32,
+    pub up: bool,
+    pub time_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FieldBossReport {
+    pub timestamp: Micros,
+    pub map_id: u32,
+    pub bosses: Vec<FieldBossSighting>,
+}
+
 #[derive(Default, Clone, Debug)]
 pub struct DecoderStats {
     pub skipped_short_frames: u64,
@@ -82,6 +136,16 @@ const ZONE_OPCODE: u32 = 0x2136;
 const HIT_NOTICE_OPCODE: u32 = 0x0338;
 const BUFF_ON_OPCODE: u32 = 0x2a38;
 const BUFF_RENEWED_OPCODE: u32 = 0x2b38;
+const BUFF_OFF_OPCODE: u32 = 0x2c38;
+const BOSS_MAP_OPCODE: u32 = 0x0191;
+/// Counters of the character (all of them at login, the changed ones later); Odyle energy is one of them.
+const COUNTERS_OPCODE: u32 = 0x0b61;
+const COUNTERS_CHANGED_OPCODE: u32 = 0x0c61;
+/// The counter that holds Odyle energy.
+const ODYLE_KEY: i64 = 0xc987;
+/// A removal reason of 0x4236: the entity died (1: loaded dead, 7: left the world).
+const REMOVED_DIED: u8 = 3;
+const REMOVED_GONE: u8 = 7;
 const NOTICE_HOLD: Micros = 1_500_000;
 const CALIBRATION_HITS: i32 = 300;
 const MIN_SCALE: f64 = 1.0;
@@ -115,6 +179,11 @@ pub struct FrameDecoder {
     exact_on_target: HashMap<i32, i64>,
     raw_estimate: HashMap<i32, (i64, i32)>,
     bundle_buffer: Vec<u8>,
+    buffs: Vec<BuffEvent>,
+    departures: Vec<Departure>,
+    boss_reports: Vec<FieldBossReport>,
+    /// Odyle energy of the own character: (basic, charged, when).
+    pub odyle: Option<(u32, u32, Micros)>,
 }
 
 fn read_varint(data: &[u8], pos: &mut usize) -> Option<i64> {
@@ -146,6 +215,11 @@ fn f32_at(f: &[u8], at: usize) -> f32 {
     f32::from_le_bytes([f[at], f[at + 1], f[at + 2], f[at + 3]])
 }
 
+/// A character name: 1-12 letters or digits, at least one letter (the tutorial's `$Kc03nyeQHr4` placeholders are not).
+fn is_character_name(name: &str) -> bool {
+    (1..=12).contains(&name.chars().count()) && name.chars().all(char::is_alphanumeric) && name.chars().any(char::is_alphabetic)
+}
+
 fn read_name(frame: &[u8], at: usize, min_length: usize) -> Option<String> {
     let length = *frame.get(at)? as usize;
     if length < min_length || length > 24 || at + 1 + length > frame.len() {
@@ -171,24 +245,34 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
+/// The hit kinds of a damage record. Layouts 6 and 7 carry them: uid | hit type | flags | restored HP (varint) | angle;
+/// layouts 4 and 5 none. Flags: 0x01 block, 0x02 parry, 0x04 perfect, 0x08 double, 0x10 iron wall, 0x20 regeneration,
+/// 0x40 perfect block (with block or parry; 0x80 mirrors a layout bit). Angle: 1 back, 2 front.
 fn read_hit_kinds(frame: &[u8], p: usize, flags: u8) -> Option<HitKinds> {
     let kind = flags & 0xf;
-    if kind == 4 {
+    if kind == 4 || kind == 5 {
         return Some(HitKinds(0));
     }
-    if !(5..=7).contains(&kind) || p + 5 > frame.len() {
+    if !(6..=7).contains(&kind) || p + 5 > frame.len() {
         return None;
     }
-    let (bits, direction) = (frame[p + 2], frame[p + 4]);
+    let bits = frame[p + 2];
+    let mut at = p + 3;
+    read_varint(frame, &mut at)?;
+    let direction = *frame.get(at)?;
     let mut kinds = 0;
-    if bits & 2 != 0 {
-        kinds |= HitKinds::PARRY;
-    }
-    if bits & 4 != 0 {
-        kinds |= HitKinds::PERFECT;
-    }
-    if bits & 8 != 0 {
-        kinds |= HitKinds::DOUBLE;
+    for (bit, k) in [
+        (0x01, HitKinds::BLOCK),
+        (0x02, HitKinds::PARRY),
+        (0x04, HitKinds::PERFECT),
+        (0x08, HitKinds::DOUBLE),
+        (0x10, HitKinds::IRON_WALL),
+        (0x20, HitKinds::REGENERATION),
+        (0x40, HitKinds::PERFECT_BLOCK),
+    ] {
+        if bits & bit != 0 {
+            kinds |= k;
+        }
     }
     if direction == 1 {
         kinds |= HitKinds::BACK;
@@ -220,6 +304,10 @@ impl FrameDecoder {
             exact_on_target: HashMap::new(),
             raw_estimate: HashMap::new(),
             bundle_buffer: Vec::new(),
+            buffs: Vec::new(),
+            departures: Vec::new(),
+            boss_reports: Vec::new(),
+            odyle: None,
         }
     }
 
@@ -233,6 +321,18 @@ impl FrameDecoder {
 
     pub fn drain_avoids(&mut self) -> Vec<AvoidEvent> {
         std::mem::take(&mut self.avoids)
+    }
+
+    pub fn drain_buffs(&mut self) -> Vec<BuffEvent> {
+        std::mem::take(&mut self.buffs)
+    }
+
+    pub fn drain_departures(&mut self) -> Vec<Departure> {
+        std::mem::take(&mut self.departures)
+    }
+
+    pub fn drain_boss_reports(&mut self) -> Vec<FieldBossReport> {
+        std::mem::take(&mut self.boss_reports)
     }
 
     pub fn decode(&mut self, frame: &[u8], timestamp: Micros, out: &mut Vec<DamageEvent>) {
@@ -371,6 +471,9 @@ impl FrameDecoder {
             ZONE_OPCODE => return self.decode_zone(frame, timestamp),
             HIT_NOTICE_OPCODE => return self.decode_hit_notice(frame, timestamp),
             BUFF_ON_OPCODE | BUFF_RENEWED_OPCODE => return self.decode_buff(frame, timestamp, opcode == BUFF_RENEWED_OPCODE),
+            BUFF_OFF_OPCODE => return self.decode_buff_off(frame, timestamp),
+            BOSS_MAP_OPCODE => return self.decode_boss_map(frame, timestamp),
+            COUNTERS_OPCODE | COUNTERS_CHANGED_OPCODE => return self.decode_counters(frame, timestamp, opcode == COUNTERS_OPCODE),
             _ => {}
         }
 
@@ -383,6 +486,7 @@ impl FrameDecoder {
             OpcodeFamily::Roster => self.decode_roster(frame, timestamp),
             OpcodeFamily::LocalPosition => self.decode_local_position(frame, timestamp),
             OpcodeFamily::Character => self.decode_character(frame, timestamp),
+            OpcodeFamily::SelfStats => self.decode_self_stats(frame),
             OpcodeFamily::Appearance => self.decode_appearance(frame),
             OpcodeFamily::NpcSpawn => self.decode_npc_spawn(frame, timestamp),
             OpcodeFamily::NpcRemove => self.decode_npc_remove(frame, timestamp),
@@ -462,6 +566,9 @@ impl FrameDecoder {
         self.zone_changes.push(ZoneChange { timestamp, zone_id, restart: false });
     }
 
+    /// Effect put on (0x2a38) or changed (0x2b38): target (varint) | [on: 01] | flags | instance (varint) | abnormal (u32) |
+    /// length (i64, ms) | end (i64, unix ms) | caster (varint) | level (u8) | [flags & 2: skill (u32)] | 2 if re-applied |
+    /// the caster's x, y, z (f32).
     fn decode_buff(&mut self, frame: &[u8], timestamp: Micros, renewed: bool) {
         let mut p = 2;
         let Some(target) = read_varint(frame, &mut p) else { return };
@@ -474,17 +581,31 @@ impl FrameDecoder {
             }
             p += 1;
         }
+        let flags = frame[p];
         p += 1;
-        if read_varint(frame, &mut p).is_none() || p + 20 > frame.len() {
+        let Some(instance) = read_varint(frame, &mut p) else { return };
+        if p + 20 > frame.len() {
             return;
         }
         let effect = u32_at(frame, p);
+        let (length_ms, end_ms) = (i64_at(frame, p + 4), i64_at(frame, p + 12));
         p += 20;
         let Some(caster) = read_varint(frame, &mut p) else { return };
         if !(1..=10_000_000).contains(&caster) || !(10..=2_999_999_999u32).contains(&effect) {
             return;
         }
         let caster = caster as i32;
+        let mut q = p + 1;
+        let skill = if flags & 2 != 0 && q + 4 <= frame.len() {
+            q += 4;
+            Some(u32_at(frame, q - 4))
+        } else {
+            None
+        };
+        if q + 13 == frame.len() {
+            let change = if renewed { BuffChange::Changed { restarted: frame[q] == 2 } } else { BuffChange::On };
+            self.buffs.push(BuffEvent { timestamp, target: target as i32, instance, abnormal: effect, caster, skill, length_ms, end_ms, change });
+        }
         if frame.len() >= 12 && frame.len() - 12 > p && self.entities.is_local_player(caster) {
             let n = frame.len();
             let (x, y, z) = (f32_at(frame, n - 12), f32_at(frame, n - 8), f32_at(frame, n - 4));
@@ -492,6 +613,124 @@ impl FrameDecoder {
             if plausible(x) && plausible(y) && z.is_finite() && z.abs() < 50_000.0 {
                 self.entities.note_local_position(x, y, timestamp);
             }
+        }
+    }
+
+    /// Effects taken off: target (varint) | count (u8) | count x (kind (u8) | instance (varint) | reason (u8) |
+    /// [kind 7: by entity (varint) | skill (u32) | skill effect (u32)]).
+    fn decode_buff_off(&mut self, frame: &[u8], timestamp: Micros) {
+        let mut p = 2;
+        let Some(target) = read_varint(frame, &mut p) else { return };
+        let Some(&count) = frame.get(p) else { return };
+        p += 1;
+        let mut removed = Vec::new();
+        for _ in 0..count {
+            let Some(&kind) = frame.get(p) else { return };
+            p += 1;
+            let Some(instance) = read_varint(frame, &mut p) else { return };
+            let Some(&reason) = frame.get(p) else { return };
+            p += 1;
+            if kind == 7 {
+                if read_varint(frame, &mut p).is_none() {
+                    return;
+                }
+                p += 8;
+            }
+            removed.push((instance, reason));
+        }
+        if p != frame.len() {
+            return;
+        }
+        for (instance, reason) in removed {
+            let change = BuffChange::Off { reason };
+            self.buffs.push(BuffEvent { timestamp, target: target as i32, instance, abnormal: 0, caster: 0, skill: None, length_ms: 0, end_ms: 0, change });
+        }
+    }
+
+    /// The field bosses of a map, sent when the player opens it: 00 00 | map (u32) | count (varint) | count x (up (u8, 0 or 1) |
+    /// boss (varint, map * 100 + n) | [up: x, y, z (f32)] | [a byte some bosses carry] | time (u64, unix ms)).
+    fn decode_boss_map(&mut self, frame: &[u8], timestamp: Micros) {
+        if frame.len() < 9 || frame[2] != 0 || frame[3] != 0 {
+            return;
+        }
+        let map_id = u32_at(frame, 4);
+        let mut p = 8;
+        let Some(count) = read_varint(frame, &mut p).filter(|n| (1..=200).contains(n)) else { return };
+        let now_ms = timestamp / 1000;
+        let plausible = |t: i64| t == 0 || (now_ms - 14 * 86_400_000..=now_ms + 3 * 86_400_000).contains(&t);
+        let entry_starts = |at: usize| {
+            if at == frame.len() {
+                return true;
+            }
+            let mut q = at + 1;
+            frame.get(at).is_some_and(|&b| b <= 1) && read_varint(frame, &mut q).is_some_and(|id| (1000..=10_000_000).contains(&id))
+        };
+        let mut bosses = Vec::new();
+        for i in 0..count {
+            let Some(&up) = frame.get(p).filter(|&&b| b <= 1) else { return };
+            p += 1;
+            let Some(boss) = read_varint(frame, &mut p) else { return };
+            let base = p + if up == 1 { 12 } else { 0 };
+            let last = i + 1 == count;
+            let found = [0usize, 1].into_iter().find_map(|extra| {
+                let at = base + extra;
+                let t = (at + 8 <= frame.len()).then(|| i64_at(frame, at))?;
+                let end = at + 8;
+                (plausible(t) && (last || entry_starts(end))).then_some((t, end))
+            });
+            let Some((time_ms, end)) = found else { return };
+            bosses.push(FieldBossSighting { boss: boss as u32, up: up == 1, time_ms });
+            p = end;
+        }
+        self.boss_reports.push(FieldBossReport { timestamp, map_id, bosses });
+    }
+
+    /// Character counters: entries kind (u8) | slot (u8) | key (varint) | values (varint), the kind telling which values are
+    /// there (a zero is left out). Odyle energy is slot 1 of `ODYLE_KEY`: kind 0x0c basic and charged, 0x04 basic, 0x08 charged.
+    /// All counters (0x0b61) have other fields first, so the entry is looked for, followed by slot 2 of the same key; changed
+    /// ones (0x0c61) are a byte and the entries.
+    fn decode_counters(&mut self, frame: &[u8], timestamp: Micros, all: bool) {
+        // kind, slot, key, the energy if the kind is one of Odyle's, where the next entry starts
+        let entry = |at: usize| -> Option<(u8, i64, (u32, u32), usize)> {
+            let (kind, slot) = (*frame.get(at)?, *frame.get(at + 1)?);
+            let mut p = at + 2;
+            let key = read_varint(frame, &mut p)?;
+            let n = match kind {
+                0x0c => 2,
+                0x04 | 0x08 => 1,
+                _ => return None,
+            };
+            let mut values = [0i64; 2];
+            for v in values.iter_mut().take(n) {
+                *v = read_varint(frame, &mut p).filter(|v| (0..=100_000).contains(v))?;
+            }
+            let energy = match kind {
+                0x0c => (values[0] as u32, values[1] as u32),
+                0x04 => (values[0] as u32, 0),
+                _ => (0, values[0] as u32),
+            };
+            Some((slot, key, energy, p))
+        };
+        let is_odyle = |slot: u8, key: i64| slot == 1 && key == ODYLE_KEY;
+        let found = if all {
+            (2..frame.len().saturating_sub(4)).find_map(|at| {
+                let (_, _, energy, end) = entry(at).filter(|e| is_odyle(e.0, e.1))?;
+                entry(end).is_some_and(|next| next.0 == 2 && next.1 == ODYLE_KEY).then_some(energy)
+            })
+        } else {
+            let mut at = 3;
+            let mut found = None;
+            while let Some((slot, key, energy, end)) = entry(at) {
+                if is_odyle(slot, key) {
+                    found = Some(energy);
+                    break;
+                }
+                at = end;
+            }
+            found
+        };
+        if let Some((basic, charged)) = found {
+            self.odyle = Some((basic, charged, timestamp));
         }
     }
 
@@ -524,7 +763,11 @@ impl FrameDecoder {
         if frame.len() != p + 2 {
             return;
         }
-        self.entities.note_removed(entity as i32, frame[frame.len() - 1], timestamp);
+        let reason = frame[frame.len() - 1];
+        if reason == REMOVED_DIED || reason == REMOVED_GONE {
+            self.departures.push(Departure { timestamp, entity: entity as i32, died: reason == REMOVED_DIED });
+        }
+        self.entities.note_removed(entity as i32, reason, timestamp);
     }
 
     fn decode_npc_spawn(&mut self, frame: &[u8], timestamp: Micros) {
@@ -1008,40 +1251,43 @@ impl FrameDecoder {
         }
     }
 
+    /// The own character record (zone load and every few minutes): opcode | combat id (varint) | mask (u32) | flags (u8, bit 0:
+    /// a name follows) | name (u8 length + UTF-8) | server (u16) | class (u32, roster code) | u8 | level (u32).
+    /// Live EU capture 2026-10-17: `33 36 db 43 5f a1 c1 28 37 03 "Kat" 63 09 1c 00 00 00 02 2d 00 00 00`.
     fn decode_character(&mut self, frame: &[u8], timestamp: Micros) {
         let mut p = 2;
         let Some(id) = read_varint(frame, &mut p) else { return };
-        let end = (frame.len() as i64 - 12).min(p as i64 + 16);
-        let mut k = p;
-        while (k as i64) < end {
-            let Some(name) = read_name(frame, k, 2) else {
-                k += 1;
-                continue;
-            };
-            let after = k + 1 + frame[k] as usize;
-            if after + 11 > frame.len() || frame[after + 6] != 1 {
-                k += 1;
-                continue;
-            }
-            let class_code = u32_at(frame, after + 2) as i32;
-            if !matches!(class_code % 4, 1 | 2) || !(1..=9).contains(&(class_code / 4)) {
-                k += 1;
-                continue;
-            }
-            let level = u32_at(frame, after + 7) as i32;
-            if !(1..=200).contains(&level) {
-                k += 1;
-                continue;
-            }
-            self.entities.set_local_character(CharacterInfo {
-                combat_id: id as i32,
-                name,
-                class_code,
-                level,
-                server_id: u16_at(frame, after),
-                received_at: timestamp,
-            });
+        if !(1..=9_999_999).contains(&id) || frame.len() < p + 6 || frame[p + 4] & 1 == 0 {
             return;
+        }
+        let at = p + 5;
+        let length = frame[at] as usize;
+        if !(1..=48).contains(&length) || at + 1 + length + 2 > frame.len() {
+            return;
+        }
+        let Some(name) = std::str::from_utf8(&frame[at + 1..at + 1 + length]).ok().filter(|n| is_character_name(n)) else { return };
+        let after = at + 1 + length;
+        let server_id = u16_at(frame, after);
+        if !(1000..3000).contains(&server_id) {
+            return;
+        }
+        let class_code = if after + 6 <= frame.len() { u32_at(frame, after + 2) as i32 } else { 0 };
+        let level = if after + 11 <= frame.len() { u32_at(frame, after + 7) as i32 } else { 0 };
+        self.entities.set_local_character(CharacterInfo {
+            combat_id: id as i32,
+            name: name.to_string(),
+            class_code,
+            level: if (1..=200).contains(&level) { level } else { 0 },
+            server_id,
+            received_at: timestamp,
+        });
+    }
+
+    /// Own stats: opcode | combat id (varint) | ...; sent only about the local player, from the moment a zone loads.
+    fn decode_self_stats(&mut self, frame: &[u8]) {
+        let mut p = 2;
+        if let Some(id) = read_varint(frame, &mut p).filter(|id| (100..=9_999_999).contains(id)) {
+            self.entities.note_self_stats(id as i32);
         }
     }
 
@@ -1139,6 +1385,74 @@ mod roster_tests {
         decoder.decode_roster(&frame, 0);
         assert_eq!(decoder.entities.party_stats("九州依然在"), Some(PartyStats { gear_score: 5895, combat_power: Some(866_616) }));
         assert_eq!(decoder.entities.party_stats("M7"), Some(PartyStats { gear_score: 5726, combat_power: Some(852_842) }));
+    }
+
+    #[test]
+    fn character_record_names_the_local_player() {
+        let frame = hex("33 36 db 43 5f a1 c1 28 37 03 4b 61 74 63 09 1c 00 00 00 02 2d 00 00 00 bf 07 00 00 bf 07 00 00");
+        let mut decoder = FrameDecoder::new(Arc::new(Protocol::load()));
+        decoder.decode_character(&frame, 0);
+        let c = decoder.entities.local_character().expect("character");
+        assert_eq!((c.combat_id, c.name.as_str(), c.server_id, c.class_code, c.level), (8667, "Kat", 2403, 28, 45));
+        assert_eq!(decoder.entities.name_for(8667).as_deref(), Some("Kat"));
+
+        // a zone change: the own-stats records move the character to its new combat id
+        let stats = hex("4a 36 a2 1f 00 00 00 00 00 00 00 00 00");
+        for _ in 0..3 {
+            decoder.decode_self_stats(&stats);
+        }
+        assert_eq!(decoder.entities.local_player_id(), Some(4002));
+        assert_eq!(decoder.entities.name_for(4002).as_deref(), Some("Kat"));
+    }
+
+    #[test]
+    fn boss_map_gives_each_boss_its_time() {
+        // the first two of Altgard's 24 bosses, live EU capture 2026-10-17; the first carries the extra byte 80
+        let frame = hex("01 91 00 00 56 04 00 00 02 00 a9 e3 06 80 ce 12 b1 48 a1 01 00 00 00 9e e3 06 7f f9 38 48 a1 01 00 00");
+        let mut decoder = FrameDecoder::new(Arc::new(Protocol::load()));
+        decoder.decode_boss_map(&frame, 1_792_211_419_284_629);
+        let reports = decoder.drain_boss_reports();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].map_id, 1110);
+        assert_eq!(reports[0].bosses[0], FieldBossSighting { boss: 111017, up: false, time_ms: 1_792_220_926_670 });
+        assert_eq!(reports[0].bosses[1], FieldBossSighting { boss: 111006, up: false, time_ms: 1_792_213_055_871 });
+    }
+
+    #[test]
+    fn odyle_energy_from_the_counters() {
+        let mut decoder = FrameDecoder::new(Arc::new(Protocol::load()));
+        // all counters at login (live EU capture 2026-10-17, cut): basic 15, charged 340
+        decoder.decode_counters(&hex("0b 61 49 04 01 00 00 00 0c 01 87 93 03 0f d4 02 04 02 87 93 03 0e 04 03 87 93 03 0e"), 5, true);
+        assert_eq!(decoder.odyle, Some((15, 340, 5)));
+        // a change: basic 30, charged 880
+        decoder.decode_counters(&hex("0c 61 01 0c 01 87 93 03 1e f0 06 01 28 00 00 00"), 6, false);
+        assert_eq!(decoder.odyle, Some((30, 880, 6)));
+        // another counter changed: the energy stays
+        decoder.decode_counters(&hex("0c 61 00 04 0c 00 00 00 0e 02"), 7, false);
+        assert_eq!(decoder.odyle, Some((30, 880, 6)));
+    }
+
+    #[test]
+    fn buff_records_open_and_close_effects() {
+        let mut decoder = FrameDecoder::new(Arc::new(Protocol::load()));
+        // Benediction on 6759 by itself, then taken off when it ran out
+        decoder.decode_buff(
+            &hex("2a 38 e7 34 01 13 82 02 e1 65 a6 09 10 27 00 00 00 00 00 00 bc 5c ba 14 a1 01 00 00 e7 34 03 30 0a f7 00 00 00 00 00 00 00 00 00 00 00 00 00 00"),
+            1,
+            false,
+        );
+        decoder.decode_buff_off(&hex("2c 38 e7 34 01 00 82 02 01"), 2);
+        let buffs = decoder.drain_buffs();
+        assert_eq!(buffs.len(), 2);
+        assert_eq!((buffs[0].target, buffs[0].instance, buffs[0].abnormal, buffs[0].caster), (6759, 258, 161_900_001, 6759));
+        assert_eq!((buffs[0].length_ms, buffs[0].skill, buffs[0].change), (10_000, Some(16_190_000), BuffChange::On));
+        assert_eq!((buffs[1].instance, buffs[1].change), (258, BuffChange::Off { reason: 1 }));
+    }
+
+    #[test]
+    fn placeholder_names_are_not_characters() {
+        assert!(is_character_name("Kat") && is_character_name("九州依然在"));
+        assert!(!is_character_name("$Kc03nyeQHr4") && !is_character_name("12345") && !is_character_name(""));
     }
 }
 

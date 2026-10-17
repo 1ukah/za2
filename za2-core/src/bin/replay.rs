@@ -117,6 +117,26 @@ impl Run {
         } else if let Some(id) = entities.local_player_id() {
             println!("local player id {id} (inferred)");
         }
+        let spans = e.buffs.spans();
+        let named = spans.iter().filter(|s| za2_core::catalog::buffs::name_of(s.abnormal).is_some()).count();
+        println!("effects {} spans ({} named, {} still on)  deaths {}", spans.len(), named, spans.iter().filter(|s| s.end.is_none()).count(), e.combat.deaths().len());
+        if let (true, Some(id), Some(from), Some(to)) = (self.verbose, entities.local_player_id(), e.combat.started_at, e.combat.last_event_at()) {
+            for b in e.buffs.uptimes(id, from, to).iter().take(12) {
+                println!("  effect on you: {:<32} {:>5.1}%  x{}", b.name, 100.0 * b.uptime, b.applications);
+            }
+        }
+        if let Some((basic, charged, _)) = e.decoder.odyle {
+            println!("odyle energy {basic} (+{charged})");
+        }
+        if !e.field_bosses.bosses.is_empty() {
+            let now = e.last_segment_at.unwrap_or(0) / 1000;
+            let mut known: Vec<_> = e.field_bosses.bosses.keys().copied().collect();
+            known.sort_unstable();
+            for id in known {
+                let name = za2_core::catalog::field_bosses::by_world_id(id).map_or("?", |b| b.name.as_str());
+                println!("  field boss {id} {name}: {:?}", e.field_bosses.state_at(id, now));
+            }
+        }
         let mut rows: Vec<_> = e.combat.damage_by_source().iter().filter(|(id, _)| entities.is_known_player(**id)).collect();
         rows.sort_by(|a, b| b.1.sum.cmp(&a.1.sum));
         for (id, stats) in rows.iter().take(20) {

@@ -7,12 +7,14 @@ use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TryS
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use za2_core::buffs::{BuffTimeline, BuffUptime};
 use za2_core::capture_stream::{read_message, CaptureMessage};
 use za2_core::catalog::zones;
 use za2_core::combat::SkillUsage;
 use za2_core::engine::Engine;
 use za2_core::combat::CombatLog;
 use za2_core::entities::{EntityDirectory, EnvObject, LiveMob};
+use za2_core::field_bosses::FieldBossBoard;
 use za2_core::position::{PositionTracker, TrackedPosition};
 use za2_core::protocol::Protocol;
 use za2_core::recording;
@@ -69,11 +71,34 @@ pub struct Row {
     pub damage: i64,
     pub dps: Option<f64>,
     pub heal: i64,
+    pub taken: i64,
     pub hits: u32,
     pub crits: u32,
     pub local: bool,
     pub estimated: bool,
     pub in_group: bool,
+}
+
+/// A player's skills: what they dealt, healed and took.
+#[derive(Clone, Debug, Default)]
+pub struct SkillSets {
+    pub damage: Vec<SkillUsage>,
+    pub heal: Vec<SkillUsage>,
+    pub taken: Vec<SkillUsage>,
+}
+
+/// A combat log over time: damage per player, one value per `bucket_seconds`, deaths, and the effects on the selected players
+/// and on what they hit most.
+#[derive(Clone, Debug, Default)]
+pub struct Timeline {
+    pub seconds: f64,
+    pub bucket_seconds: f64,
+    pub series: HashMap<i32, Vec<i64>>,
+    /// (seconds from the start, player)
+    pub deaths: Vec<(f64, i32)>,
+    pub buffs: HashMap<i32, Vec<BuffUptime>>,
+    /// The name of each selected player's main target and the effects on it.
+    pub target_buffs: HashMap<i32, (String, Vec<BuffUptime>)>,
 }
 
 #[derive(Clone, Debug)]
@@ -98,7 +123,12 @@ pub struct Snapshot {
     pub live_mobs: Vec<LiveMob>,
     pub live_env: Vec<EnvObject>,
     /// Skill breakdown of each selected player (the meter's and the overlays' selections).
-    pub skills: HashMap<i32, Vec<SkillUsage>>,
+    pub skills: HashMap<i32, SkillSets>,
+    pub fight_timeline: Arc<Timeline>,
+    pub timeline: Arc<Timeline>,
+    pub field_bosses: Arc<FieldBossBoard>,
+    /// Odyle energy: basic and charged.
+    pub odyle: Option<(u32, u32)>,
     pub target: Option<(String, i64, i64)>,
     /// Round trip to the game server (ms).
     pub ping: Option<i64>,
@@ -132,6 +162,10 @@ impl Default for Snapshot {
             live_mobs: Vec::new(),
             live_env: Vec::new(),
             skills: HashMap::new(),
+            fight_timeline: Default::default(),
+            timeline: Default::default(),
+            field_bosses: Default::default(),
+            odyle: None,
             target: None,
             ping: None,
             time_to_kill: None,
@@ -343,7 +377,7 @@ impl Worker {
             format!(
                 "{}, {} level {}, server {}",
                 c.name,
-                za2_core::catalog::skills::class_from_code(c.class_code).unwrap_or("unknown class"),
+                za2_core::catalog::skills::class_from_roster_code(c.class_code).unwrap_or("unknown class"),
                 c.level,
                 c.server_id
             )
@@ -375,7 +409,24 @@ impl Worker {
         self.memory.merge(&mut s.live_mobs, now);
         s.memory_status = self.memory.describe();
         s.live_env = engine.decoder.entities.live_env(now);
-        s.skills = self.selected.iter().map(|&id| (id, engine.combat.skill_breakdown(id, false))).collect();
+        s.skills = self
+            .selected
+            .iter()
+            .map(|&id| {
+                let c = &engine.combat;
+                (id, SkillSets { damage: c.skill_breakdown(id, false), heal: c.skill_breakdown(id, true), taken: c.taken_breakdown(id) })
+            })
+            .collect();
+        s.fight_timeline = Arc::new(timeline_of(&engine.fight, &engine.buffs, &engine.decoder.entities, &self.selected));
+        s.timeline = Arc::new(timeline_of(&engine.combat, &engine.buffs, &engine.decoder.entities, &self.selected));
+        if engine.field_bosses_changed {
+            engine.field_bosses_changed = false;
+            s.field_bosses = Arc::new(engine.field_bosses.clone());
+            if !self.replay {
+                save_field_bosses(&engine.field_bosses);
+            }
+        }
+        s.odyle = engine.decoder.odyle.map(|(basic, charged, _)| (basic, charged));
         let r = &engine.reassembler;
         let d = &engine.decoder.stats;
         s.counters.segments = engine.segments;
@@ -441,6 +492,10 @@ fn run(source: Source, own_name: String, reset_on_zone: bool, shared: Arc<Shared
     }
     engine.decoder.entities.set_configured_local_name(Some(&own_name));
     let queue_dropped = Arc::new(AtomicU64::new(0));
+    if !matches!(source, Source::Replay { .. }) {
+        engine.field_bosses = load_field_bosses();
+        engine.field_bosses_changed = true;
+    }
     let mut worker = Worker {
         engine,
         tracker: PositionTracker::new(),
@@ -608,6 +663,53 @@ fn time_to_kill(ttk: &mut TtkEstimator, engine: &Engine, now: Micros) -> Option<
     Some(((total_ms - elapsed_ms) / 1000.0).max(0.0))
 }
 
+fn timeline_of(log: &CombatLog, buffs: &BuffTimeline, entities: &EntityDirectory, selected: &[i32]) -> Timeline {
+    let seconds = log_seconds(log);
+    let bucket = sessions::bucket_for(seconds);
+    let mut t = Timeline { seconds, bucket_seconds: bucket as f64 / SECOND as f64, series: log.series(false, bucket), ..Default::default() };
+    let (Some(from), Some(to)) = (log.started_at, log.last_event_at()) else { return t };
+    t.deaths = log.deaths().iter().map(|d| ((d.0 - from) as f64 / 1e6, d.1)).collect();
+    for &id in selected {
+        t.buffs.insert(id, buffs.uptimes(id, from, to));
+        let mut on_targets: HashMap<i32, i64> = HashMap::new();
+        for e in log.events().iter().filter(|e| e.source == id && !e.is_heal) {
+            *on_targets.entry(e.target).or_default() += e.amount;
+        }
+        if let Some((target, _)) = on_targets.into_iter().max_by_key(|t| t.1) {
+            let name = entities
+                .boss_npc_id_of(target)
+                .and_then(za2_core::catalog::bosses::find)
+                .map(|b| b.name.clone())
+                .or_else(|| entities.monster_name_for(target, "en").map(str::to_string))
+                .or_else(|| entities.name_for(target))
+                .unwrap_or_else(|| format!("#{target}"));
+            t.target_buffs.insert(id, (name, buffs.uptimes(target, from, to)));
+        }
+    }
+    t
+}
+
+fn field_bosses_path() -> PathBuf {
+    crate::settings::data_dir().join("field_bosses.json")
+}
+
+fn load_field_bosses() -> FieldBossBoard {
+    std::fs::read_to_string(field_bosses_path()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+fn save_field_bosses(board: &FieldBossBoard) {
+    let path = field_bosses_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(text) = serde_json::to_string(board) {
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, text).is_ok() {
+            let _ = std::fs::rename(tmp, path);
+        }
+    }
+}
+
 fn log_seconds(log: &CombatLog) -> f64 {
     match (log.started_at, log.last_event_at()) {
         (Some(a), Some(b)) => (b - a) as f64 / 1e6,
@@ -640,6 +742,7 @@ fn player_rows(log: &CombatLog, entities: &EntityDirectory) -> Vec<Row> {
             damage: stats.sum,
             dps: stats.rate(),
             heal: healing.get(&id).copied().unwrap_or(0),
+            taken: log.taken_by_target().get(&id).copied().unwrap_or(0),
             hits: stats.hits,
             crits: stats.crits,
             local: Some(id) == local,

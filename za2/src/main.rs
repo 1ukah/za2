@@ -1,3 +1,4 @@
+mod chart;
 mod control;
 mod desktop;
 mod icons;
@@ -40,7 +41,7 @@ struct Args {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: za2 [--replay recording.jsonl [--speed N]] [--x11] [--tab meter|map|settings] [--helper PATH] [--memory-helper PATH | --no-memory] [--assets DIR]");
+    eprintln!("usage: za2 [--replay recording.jsonl [--speed N]] [--x11] [--tab meter|map|timeline|settings] [--helper PATH] [--memory-helper PATH | --no-memory] [--assets DIR]");
     eprintln!("       za2 --version");
     eprintln!("       za2 --send show|reset|toggle-overlay|toggle-map-overlay|toggle-lock|map-zoom-in|map-zoom-out");
     std::process::exit(2);
@@ -62,7 +63,8 @@ fn parse_args() -> Args {
                 a.tab = match it.next().as_deref() {
                     Some("meter") => 0,
                     Some("map") => 1,
-                    Some("settings") => 2,
+                    Some("timeline") => 2,
+                    Some("settings") => 3,
                     _ => usage(),
                 }
             }
@@ -184,13 +186,25 @@ struct MapState {
 struct Models {
     rows: Rc<VecModel<MeterRow>>,
     skills: Rc<VecModel<SkillRow>>,
+    chart_lines: Rc<VecModel<ChartLine>>,
+    chart_marks: Rc<VecModel<ChartMark>>,
+    boss_rows: Rc<VecModel<BossRow>>,
 }
 
 impl Models {
     fn new(app: &App) -> Models {
-        let models = Models { rows: Rc::new(VecModel::default()), skills: Rc::new(VecModel::default()) };
+        let models = Models {
+            rows: Rc::new(VecModel::default()),
+            skills: Rc::new(VecModel::default()),
+            chart_lines: Rc::new(VecModel::default()),
+            chart_marks: Rc::new(VecModel::default()),
+            boss_rows: Rc::new(VecModel::default()),
+        };
         app.set_rows(ModelRc::from(models.rows.clone()));
         app.set_skills(ModelRc::from(models.skills.clone()));
+        app.set_chart_lines(ModelRc::from(models.chart_lines.clone()));
+        app.set_chart_marks(ModelRc::from(models.chart_marks.clone()));
+        app.set_boss_rows(ModelRc::from(models.boss_rows.clone()));
         models
     }
 }
@@ -367,7 +381,7 @@ fn apply_overlay(o: &OverlayWindow, cfg: &settings::OverlayConfig, ui: &Ui) {
     if selected >= 0 {
         let name = s.rows.iter().find(|r| r.id == selected).map_or_else(|| "Skills".to_string(), |r| format!("Skills of {}", r.name));
         o.window.set_skills_title(name.into());
-        sync_model(&o.skills, skill_rows(s.skills.get(&selected).map_or(&[][..], Vec::as_slice)));
+        sync_model(&o.skills, skill_rows(skills_of(s.skills.get(&selected), if healing { 1 } else { 0 }), seconds));
     } else {
         sync_model(&o.skills, Vec::new());
     }
@@ -419,20 +433,50 @@ fn thousands(n: u64) -> String {
     out
 }
 
-fn skill_rows(skills: &[za2_core::combat::SkillUsage]) -> Vec<SkillRow> {
+/// A share of `n` in `of` as "12%"; empty when `of` is 0.
+fn percent(n: u32, of: u32) -> String {
+    if of > 0 { format!("{:.0}%", 100.0 * n as f64 / of as f64) } else { String::new() }
+}
+
+/// The breakdown rows of `skills`; `seconds` is the time the player fought (0: unknown, no rate).
+fn skill_rows(skills: &[za2_core::combat::SkillUsage], seconds: f64) -> Vec<SkillRow> {
     let total: i64 = skills.iter().map(|k| k.total).sum::<i64>().max(1);
     skills
         .iter()
-        .map(|k| SkillRow {
-            icon: icons::skill_icon(k.skill_id),
-            name: k.skill.clone().into(),
-            total: compact(k.total).into(),
-            hits: k.hits.to_string().into(),
-            crit: if k.hits > 0 { format!("{:.0}%", 100.0 * k.crit_hits as f64 / k.hits as f64) } else { String::new() }.into(),
-            share: k.total as f32 / total as f32,
-            min_max: format!("{} - {}", compact(k.min), compact(k.max)).into(),
+        .map(|k| {
+            let mut detail = vec![format!("{} - {}", compact(k.min), compact(k.max))];
+            if seconds >= 1.0 {
+                detail.push(format!("{}/s", compact((k.total as f64 / seconds).round() as i64)));
+            }
+            for (label, n) in [("back", k.back), ("perfect", k.perfect), ("double", k.double), ("parry", k.parry)] {
+                if n > 0 {
+                    detail.push(format!("{label} {}", percent(n, k.known_kinds)));
+                }
+            }
+            if k.ticks > 0 {
+                detail.push(format!("{} ticks", k.ticks));
+            }
+            SkillRow {
+                icon: icons::skill_icon(k.skill_id),
+                name: k.skill.clone().into(),
+                total: compact(k.total).into(),
+                hits: k.hits.to_string().into(),
+                crit: percent(k.crit_hits, k.hits).into(),
+                share: k.total as f32 / total as f32,
+                detail: detail.join("  ·  ").into(),
+            }
         })
         .collect()
+}
+
+/// The list of `sets` that `mode` picks: 0 damage dealt, 1 healing, 2 damage taken.
+fn skills_of(sets: Option<&worker::SkillSets>, mode: i32) -> &[za2_core::combat::SkillUsage] {
+    match (sets, mode) {
+        (Some(s), 1) => &s.heal,
+        (Some(s), 2) => &s.taken,
+        (Some(s), _) => &s.damage,
+        (None, _) => &[],
+    }
 }
 
 /// Makes `model` hold `rows`, touching only the rows that changed.
@@ -519,6 +563,7 @@ struct ShownRow {
     damage: i64,
     dps: Option<f64>,
     heal: i64,
+    taken: i64,
     hits: u32,
     crits: u32,
     local: bool,
@@ -533,7 +578,11 @@ fn selected_session(ui: &Ui) -> Option<&za2_core::sessions::SessionSummary> {
 
 fn session_label(s: &za2_core::sessions::SessionSummary) -> String {
     let start = za2_core::recording::format_time(s.start);
-    format!("{} {}  {}  {}", &start[5..10], &start[11..16], s.zone_name, compact(s.total()))
+    let place = match &s.boss {
+        Some(boss) => format!("{boss} ({})", s.zone_name),
+        None => s.zone_name.clone(),
+    };
+    format!("{} {}  {}  {}", &start[5..10], &start[11..16], place, compact(s.total()))
 }
 
 fn apply_meter(app: &App, ui: &Ui) {
@@ -554,6 +603,7 @@ fn apply_meter(app: &App, ui: &Ui) {
                 damage: r.damage,
                 dps: r.dps,
                 heal: r.heal,
+                taken: r.taken,
                 hits: r.hits,
                 crits: r.crits,
                 local: r.local,
@@ -571,6 +621,7 @@ fn apply_meter(app: &App, ui: &Ui) {
                 damage: r.damage,
                 dps: r.dps,
                 heal: r.heal,
+                taken: r.taken,
                 hits: r.hits,
                 crits: r.crits,
                 local: r.local,
@@ -602,6 +653,7 @@ fn apply_meter(app: &App, ui: &Ui) {
             share: r.damage as f32 / top as f32,
             share_text: if total > 0 { format!("{:.0}%", 100.0 * r.damage as f64 / total as f64) } else { String::new() }.into(),
             heal: if r.heal > 0 { compact(r.heal) } else { String::new() }.into(),
+            taken: if r.taken > 0 { compact(r.taken) } else { String::new() }.into(),
             crit: if r.hits > 0 { format!("{:.0}%", 100.0 * r.crits as f64 / r.hits as f64) } else { String::new() }.into(),
             local: r.local,
             estimated: r.estimated,
@@ -634,19 +686,170 @@ fn apply_meter(app: &App, ui: &Ui) {
     app.set_ping_text(ping.into());
     app.set_ping_color(ping_color);
 
-    if history.is_some() {
-        sync_model(&ui.models.skills, Vec::new());
-        app.set_skills_title("Skill details are kept for the current encounter only".into());
-        return;
-    }
     let selected = ui.selections.meter.get();
-    sync_model(&ui.models.skills, skill_rows(s.skills.get(&selected).map_or(&[][..], Vec::as_slice)));
-    let title = if selected >= 0 {
-        s.rows.iter().find(|r| r.id == selected).map(|r| format!("Skills of {}", r.name)).unwrap_or_else(|| "Skills".into())
-    } else {
-        "Select a player to see the skills".into()
+    let mode = app.get_skill_mode();
+    let player = all.iter().find(|r| r.id == selected);
+    let seconds = player.and_then(|r| Some(r.damage as f64 / r.dps?)).filter(|s| s.is_finite()).unwrap_or(0.0);
+    let skills = match history {
+        Some(h) => h.rows.iter().find(|r| r.id == selected).map_or(&[][..], |r| match mode {
+            1 => &r.heal_skills,
+            2 => &r.taken_skills,
+            _ => &r.skills,
+        }),
+        None => skills_of(s.skills.get(&selected), mode),
+    };
+    sync_model(&ui.models.skills, skill_rows(skills, if mode == 0 { seconds } else { 0.0 }));
+    let what = ["Skills", "Healing", "Damage taken"][mode.clamp(0, 2) as usize];
+    let title = match player {
+        Some(r) => format!("{what} of {}", r.name),
+        None if selected >= 0 => what.to_string(),
+        None => "Select a player to see the skills".into(),
     };
     app.set_skills_title(title.into());
+    app.set_odyle_text(s.odyle.map(|(basic, charged)| if charged > 0 { format!("{basic} (+{charged})") } else { basic.to_string() }).unwrap_or_default().into());
+    if app.get_tab() == 2 {
+        apply_timeline(app, ui);
+    }
+}
+
+/// Line colours of the DPS chart, by rank.
+const CHART_COLORS: [(u8, u8, u8); 8] =
+    [(0xa8, 0xa0, 0xff), (0x68, 0xcb, 0xa4), (0xe5, 0xc6, 0x8a), (0xf1, 0x7b, 0x87), (0x7c, 0xc4, 0xf5), (0xf5, 0xa9, 0x7c), (0xc7, 0x92, 0xea), (0x9a, 0xa0, 0xb4)];
+
+/// The Timeline tab: the DPS chart of the players the meter shows, their deaths, and the effects on the selected player or
+/// their target. For the current fight or total, or a saved session.
+fn apply_timeline(app: &App, ui: &Ui) {
+    let s = &ui.snapshot;
+    let history = selected_session(ui);
+    let live = if ui.settings.meter_range == 0 { &s.fight_timeline } else { &s.timeline };
+    let (seconds, bucket) = match history {
+        Some(h) => (h.fight_seconds, h.bucket_seconds),
+        None => (live.seconds, live.bucket_seconds),
+    };
+    let (width, height) = (app.get_chart_width(), app.get_chart_height());
+    let cursor = app.get_chart_cursor();
+    let shown: Vec<MeterRow> = (0..ui.models.rows.row_count()).filter_map(|i| ui.models.rows.row_data(i)).take(CHART_COLORS.len()).collect();
+    let curves: Vec<(&MeterRow, Vec<f64>)> = shown
+        .iter()
+        .filter_map(|r| {
+            let series = match history {
+                Some(h) => h.rows.iter().find(|x| x.id == r.id).map(|x| &x.series),
+                None => live.series.get(&r.id),
+            }?;
+            Some((r, chart::smoothed_dps(series, bucket)))
+        })
+        .collect();
+    let top = chart::nice_top(curves.iter().flat_map(|c| c.1.iter().copied()).fold(0.0, f64::max));
+    let lines: Vec<ChartLine> = curves
+        .iter()
+        .enumerate()
+        .map(|(i, (r, dps))| {
+            let at = (cursor >= 0.0 && !dps.is_empty()).then(|| ((cursor as f64 * (dps.len() - 1) as f64).round() as usize).min(dps.len() - 1));
+            ChartLine {
+                id: r.id,
+                commands: chart::path_commands(dps, top, width, height).into(),
+                color: rgb(CHART_COLORS[i]),
+                name: r.name.clone(),
+                value: at.map_or_else(|| r.dps.clone(), |k| compact(dps[k].round() as i64).into()),
+                local: r.local,
+            }
+        })
+        .collect();
+    sync_model(&ui.models.chart_lines, lines);
+    let name_of = |id: i32| shown.iter().find(|r| r.id == id).map_or_else(|| format!("#{id}"), |r| r.name.to_string());
+    let deaths: Vec<(f64, i32)> = match history {
+        Some(h) => h.rows.iter().flat_map(|r| r.deaths.iter().map(move |&t| (t, r.id))).collect(),
+        None => live.deaths.clone(),
+    };
+    let marks: Vec<ChartMark> = deaths
+        .iter()
+        .filter(|_| seconds > 0.0)
+        .map(|&(t, id)| ChartMark { x: (t / seconds).clamp(0.0, 1.0) as f32, label: format!("{} died", name_of(id)).into() })
+        .collect();
+    sync_model(&ui.models.chart_marks, marks);
+    app.set_chart_top(format!("{}/s", compact(top as i64)).into());
+    app.set_chart_duration(duration_text(seconds).into());
+    app.set_chart_cursor_time(if cursor >= 0.0 { duration_text(cursor as f64 * seconds) } else { String::new() }.into());
+    app.set_chart_empty(if curves.iter().any(|c| !c.1.is_empty()) { "" } else { "No damage yet" }.into());
+
+    let selected = ui.selections.meter.get();
+    let on_target = app.get_buff_mode() == 1;
+    let (title, uptimes): (String, Option<&Vec<za2_core::buffs::BuffUptime>>) = match (history, on_target) {
+        (Some(h), false) => (format!("Effects on {}", name_of(selected)), h.rows.iter().find(|r| r.id == selected).map(|r| &r.buffs)),
+        (Some(_), true) => ("Effects on the target are not kept for past sessions".into(), None),
+        (None, false) => (format!("Effects on {}", name_of(selected)), live.buffs.get(&selected)),
+        (None, true) => match live.target_buffs.get(&selected) {
+            Some((target, list)) => (format!("Effects on {target}, {}'s main target", name_of(selected)), Some(list)),
+            None => ("Effects on the target".into(), None),
+        },
+    };
+    let lanes: Vec<BuffLane> = uptimes
+        .into_iter()
+        .flatten()
+        .take(80)
+        .map(|b| BuffLane {
+            icon: icons::skill_icon(b.skill.map_or(b.abnormal as i32 / 10, |k| k as i32)),
+            name: b.name.clone().into(),
+            uptime: if b.uptime >= 0.01 { format!("{:.0}%", 100.0 * b.uptime) } else { "<1%".into() }.into(),
+            count: b.applications.to_string().into(),
+            own: b.own,
+            bars: ModelRc::new(VecModel::from(
+                b.spans
+                    .iter()
+                    .filter(|_| seconds > 0.0)
+                    .map(|&(a, z)| BuffBar { x: (a / seconds).clamp(0.0, 1.0) as f32, w: ((z - a) / seconds).clamp(0.0, 1.0) as f32 })
+                    .collect::<Vec<_>>(),
+            )),
+        })
+        .collect();
+    app.set_buff_lanes(ModelRc::new(VecModel::from(lanes)));
+    app.set_buff_title(if selected >= 0 { title } else { "Effects".into() }.into());
+    app.set_buff_empty(
+        if selected < 0 { "Select a player in the legend above or on the Meter tab to see the effects on them" } else { "No timed effects" }.into(),
+    );
+}
+
+/// The field bosses of the shown map, with what is known of them.
+fn apply_bosses(app: &App, ui: &Ui) {
+    let map = displayed_map(ui);
+    let now_ms = ui.snapshot.now / 1000;
+    let board = &ui.snapshot.field_bosses;
+    let bosses: Vec<&za2_core::catalog::field_bosses::FieldBoss> =
+        za2_core::catalog::field_bosses::all().iter().filter(|b| map.table.ends_with(&format!("/{}", b.map_key))).collect();
+    let ago = |ms: i64| duration_text_long(((now_ms - ms) / 1000) as f64);
+    let mut rows: Vec<(i64, BossRow)> = bosses
+        .iter()
+        .enumerate()
+        .map(|(index, b)| {
+            use za2_core::field_bosses::BossState;
+            let seen = board.bosses.get(&b.world_id).map(|s| s.seen_ms);
+            let (status, color, order) = match board.state_at(b.world_id, now_ms) {
+                Some(BossState::Up { .. }) => ("Up".to_string(), Color::from_rgb_u8(0x68, 0xcb, 0xa4), i64::MIN),
+                Some(BossState::Down { back_ms }) if back_ms > 0 => (format!("in {}", duration_text_long(((back_ms - now_ms) / 1000) as f64)), Color::from_rgb_u8(0xe5, 0xc6, 0x8a), back_ms),
+                Some(BossState::Down { .. }) => ("Down".to_string(), Color::from_rgb_u8(0xf1, 0x7b, 0x87), i64::MAX - 1),
+                Some(BossState::Killed { at_ms }) => (format!("killed {} ago", ago(at_ms)), Color::from_rgb_u8(0xf1, 0x7b, 0x87), i64::MAX - 1),
+                None => ("?".to_string(), Color::from_rgb_u8(0x96, 0x98, 0xa8), i64::MAX),
+            };
+            let detail = seen.map_or_else(|| "not seen yet".to_string(), |ms| format!("seen {} ago", ago(ms)));
+            (order, BossRow { name: b.name.clone().into(), status: status.into(), detail: detail.into(), color, index: index as i32 })
+        })
+        .collect();
+    rows.sort_by_key(|r| r.0);
+    sync_model(&ui.models.boss_rows, rows.into_iter().map(|r| r.1).collect());
+    app.set_boss_summary(
+        if bosses.is_empty() {
+            "No field bosses on this map.".to_string()
+        } else {
+            "The game tells the field bosses of your faction's map when you open the map (M) in the game.".to_string()
+        }
+        .into(),
+    );
+}
+
+/// "1:23:45" for an hour or more, else "23:45".
+fn duration_text_long(seconds: f64) -> String {
+    let s = seconds.max(0.0) as u64;
+    if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { duration_text(s as f64) }
 }
 
 fn apply_status(app: &App, ui: &Ui) {
@@ -988,6 +1191,7 @@ fn apply_map(app: &App, ui: &mut Ui, force: bool) {
             app.set_me_heading(p.heading as f32);
             app.set_me_color(state_color(p.state));
             app.set_me_label(if p.state == PositionState::Stale { "?".into() } else { SharedString::new() });
+            app.set_radar_radius(radar_radius(&ui.settings, map, &view, p.x as f64, p.y as f64));
         }
         None => app.set_me_visible(false),
     }
@@ -1081,6 +1285,7 @@ fn apply_map_overlay(overlay: &MapOverlay, ui: &mut Ui, force: bool) {
     overlay.set_me_visible(p.state != PositionState::Unknown);
     overlay.set_me_x(me_x as f32);
     overlay.set_me_y(me_y as f32);
+    overlay.set_radar_radius(radar_radius(&ui.settings, map, &view, p.x as f64, p.y as f64));
     overlay.set_panned(ui.overlay_pan != (0.0, 0.0));
     overlay.set_me_heading(p.heading as f32);
     overlay.set_me_color(state_color(p.state));
@@ -1156,6 +1361,16 @@ const CUBE_SILENT_METRES: f64 = 3.0;
 /// Seconds between beeps for the nearest cube `metres` away: faster when closer, silent at the cube.
 fn cube_beep_interval(metres: f64) -> Option<f64> {
     (metres.is_finite() && metres >= CUBE_SILENT_METRES).then(|| (0.15 + (metres - 4.0) / 56.0 * 1.85).clamp(0.15, 2.0))
+}
+
+/// Screen radius of the Hidden Cube radar circle around (x, y); 0 when the Hidden Cubes are hidden.
+fn radar_radius(settings: &Settings, map: &MapInfo, view: &View, x: f64, y: f64) -> f32 {
+    if !settings.show_cubes {
+        return 0.0;
+    }
+    let (cx, cy) = view.to_screen(map, x, y);
+    let (ex, ey) = view.to_screen(map, x + map::CUBE_RADAR_RANGE, y);
+    (ex - cx).hypot(ey - cy) as f32
 }
 
 fn play_cube_sound(settings: &Settings) {
@@ -1292,8 +1507,8 @@ fn main() {
     app.set_overlays_locked(settings.overlays_locked);
     app.set_overlay_opacity(settings.overlay_opacity);
     app.set_overlay_radius(settings.overlay_radius_metres as f32);
-    app.set_tab(if args.tab == 2 { 0 } else { args.tab });
-    app.set_settings_open(args.tab == 2);
+    app.set_tab(if args.tab == 3 { 0 } else { args.tab });
+    app.set_settings_open(args.tab == 3);
     app.set_meter_range(settings.meter_range as i32);
     map_overlay.set_locked(settings.overlays_locked);
     map_overlay.set_overlay_opacity(settings.overlay_opacity);
@@ -1335,6 +1550,52 @@ fn main() {
             u.settings.scope = scope;
             u.settings.save();
             apply_meter(&weak.unwrap(), &u);
+        });
+    }
+    {
+        let ui = ui.clone();
+        let weak = app.as_weak();
+        app.on_skill_mode_changed(move |_| apply_meter(&weak.unwrap(), &ui.borrow()));
+    }
+    {
+        let ui = ui.clone();
+        let weak = app.as_weak();
+        app.on_chart_resized(move || {
+            let app = weak.unwrap();
+            if let Ok(u) = ui.try_borrow() {
+                apply_timeline(&app, &u);
+            }
+        });
+    }
+    {
+        let ui = ui.clone();
+        let weak = app.as_weak();
+        app.on_chart_hover(move |at| {
+            let app = weak.unwrap();
+            app.set_chart_cursor(if at < 0.0 { -1.0 } else { at.clamp(0.0, 1.0) });
+            apply_timeline(&app, &ui.borrow());
+        });
+    }
+    {
+        let ui = ui.clone();
+        let weak = app.as_weak();
+        app.on_buff_mode_changed(move |_| apply_timeline(&weak.unwrap(), &ui.borrow()));
+    }
+    {
+        let ui = ui.clone();
+        let weak = app.as_weak();
+        app.on_focus_boss(move |index| {
+            let app = weak.unwrap();
+            let mut u = ui.borrow_mut();
+            let map = displayed_map(&u);
+            let boss = za2_core::catalog::field_bosses::all().iter().filter(|b| map.table.ends_with(&format!("/{}", b.map_key))).nth(index.max(0) as usize);
+            if let Some(b) = boss {
+                u.map.manual = Some(map);
+                u.map.follow = false;
+                u.map.center = (b.x as f64, b.y as f64);
+                app.set_follow(false);
+                apply_map(&app, &mut u, true);
+            }
         });
     }
     {
@@ -1935,6 +2196,9 @@ fn main() {
                 }
                 apply_meter(&app, &u);
                 apply_status(&app, &u);
+                if app.get_tab() == 1 && app.get_filter_tab() == 2 {
+                    apply_bosses(&app, &u);
+                }
                 if let Some(name) = u.snapshot.learned_name.clone() {
                     if !learned_saved && name != u.settings.own_character_name {
                         learned_saved = true;

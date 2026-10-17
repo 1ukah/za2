@@ -148,6 +148,8 @@ pub struct EntityDirectory {
     not_players: HashSet<String>,
     guilds: HashMap<i32, String>,
     explicit_local_id: Option<i32>,
+    /// Own-stats records naming one entity in a row, while it is not yet the local player.
+    self_stats_streak: Option<(i32, u32)>,
     character: Option<CharacterInfo>,
     configured_local_name: Option<String>,
 
@@ -182,6 +184,8 @@ pub struct EntityDirectory {
     pub hit_points: HitPoints,
 }
 
+/// Own-stats records about one entity in a row that make it the local player.
+const SELF_STATS_IN_A_ROW: u32 = 3;
 /// An own position from a position or effect frame wins outright for this long.
 const EXACT_HOLD: Micros = 6 * SECOND;
 /// ... and over the median of the surroundings for this long.
@@ -254,6 +258,28 @@ impl EntityDirectory {
             self.local_id_changes.push((previous_id.unwrap(), info.combat_id));
         }
         self.character = Some(info);
+    }
+
+    /// An own-stats record about `id`: three in a row about another entity move the local player there (a new zone), keeping
+    /// the known character until its next record arrives.
+    pub fn note_self_stats(&mut self, id: i32) {
+        if self.explicit_local_id == Some(id) {
+            self.self_stats_streak = None;
+            return;
+        }
+        let streak = match self.self_stats_streak {
+            Some((last, n)) if last == id => n + 1,
+            _ => 1,
+        };
+        if streak < SELF_STATS_IN_A_ROW {
+            self.self_stats_streak = Some((id, streak));
+            return;
+        }
+        self.self_stats_streak = None;
+        match self.character.clone() {
+            Some(info) => self.set_local_character(CharacterInfo { combat_id: id, ..info }),
+            None => self.explicit_local_id = Some(id),
+        }
     }
 
     pub fn drain_local_id_changes(&mut self) -> Vec<(i32, i32)> {

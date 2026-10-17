@@ -1,10 +1,12 @@
 pub mod assets;
+pub mod buffs;
 pub mod capture_stream;
 pub mod catalog;
 pub mod combat;
 pub mod decoder;
 pub mod engine;
 pub mod entities;
+pub mod field_bosses;
 pub mod lz4;
 pub mod memory_stream;
 pub mod ping;

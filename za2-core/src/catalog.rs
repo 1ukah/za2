@@ -725,3 +725,81 @@ mod tests {
         assert_eq!(skills::icon_of(1), None);
     }
 }
+
+pub mod buffs {
+    use super::*;
+
+    fn names() -> &'static HashMap<u32, String> {
+        static NAMES: OnceLock<HashMap<u32, String>> = OnceLock::new();
+        NAMES.get_or_init(|| {
+            object_entries(read_json("skills/buff_names_en.json").as_ref())
+                .filter_map(|(k, v)| Some((u32::from_str_radix(k.trim_start_matches("0x"), 16).ok()?, v.as_str()?.to_string())))
+                .collect()
+        })
+    }
+
+    /// The English name of an effect (abnormal).
+    pub fn name_of(abnormal: u32) -> Option<&'static str> {
+        names().get(&abnormal).map(String::as_str)
+    }
+}
+
+pub mod field_bosses {
+    use super::*;
+
+    pub struct FieldBoss {
+        pub npc: i32,
+        /// The id the map report gives it: the map's id times 100 plus its place among the map's bosses in NPC order
+        /// (101006: the sixth of Verteron, 1010).
+        pub world_id: u32,
+        pub map_key: String,
+        pub map_name: String,
+        pub name: String,
+        pub x: f32,
+        pub y: f32,
+    }
+
+    fn table() -> &'static Vec<FieldBoss> {
+        static TABLE: OnceLock<Vec<FieldBoss>> = OnceLock::new();
+        TABLE.get_or_init(|| {
+            let doc = read_json("bosses/field_bosses.json");
+            let mut out = Vec::new();
+            for map in doc.as_ref().and_then(|d| d.get("maps")).and_then(Value::as_array).into_iter().flatten() {
+                let map_id = map.get("id").and_then(Value::as_u64).unwrap_or(0) as u32;
+                if map_id == 0 {
+                    continue;
+                }
+                let map_key = map.get("key").and_then(Value::as_str).unwrap_or_default().to_string();
+                let map_name = localized(&names_of(map), "en").unwrap_or(&map_key).to_string();
+                let mut bosses: Vec<&Value> = map.get("bosses").and_then(Value::as_array).into_iter().flatten().collect();
+                bosses.sort_by_key(|b| b.get("npc").and_then(Value::as_i64).unwrap_or(0));
+                for (i, boss) in bosses.into_iter().enumerate() {
+                    let Some(npc) = boss.get("npc").and_then(Value::as_i64) else { continue };
+                    let coordinate = |k: &str| boss.get(k).and_then(Value::as_f64).unwrap_or(0.0) as f32;
+                    out.push(FieldBoss {
+                        npc: npc as i32,
+                        world_id: map_id * 100 + i as u32 + 1,
+                        map_key: map_key.clone(),
+                        map_name: map_name.clone(),
+                        name: localized(&names_of(boss), "en").unwrap_or_default().to_string(),
+                        x: coordinate("x"),
+                        y: coordinate("y"),
+                    });
+                }
+            }
+            out
+        })
+    }
+
+    pub fn all() -> &'static [FieldBoss] {
+        table()
+    }
+
+    pub fn by_world_id(world_id: u32) -> Option<&'static FieldBoss> {
+        table().iter().find(|b| b.world_id == world_id)
+    }
+
+    pub fn by_npc(npc: i32) -> Option<&'static FieldBoss> {
+        table().iter().find(|b| b.npc == npc)
+    }
+}
