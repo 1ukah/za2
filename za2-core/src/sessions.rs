@@ -79,7 +79,7 @@ pub fn player_rows(combat: &CombatLog, entities: &EntityDirectory) -> Vec<Sessio
     ids.dedup();
     let mut rows: Vec<SessionRow> = ids
         .into_iter()
-        .filter(|id| entities.is_known_player(*id))
+        .filter(|id| entities.is_known_player(*id) || Some(*id) == local)
         .map(|id| {
             let stats = combat.damage_by_source().get(&id).cloned().unwrap_or_default();
             SessionRow {

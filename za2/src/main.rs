@@ -514,6 +514,9 @@ struct Ui {
     selections: Rc<Selections>,
     /// How far the map overlay is moved away from the player, in world units.
     overlay_pan: (f64, f64),
+    /// What the effect lanes were built from (the effects and the window length), so an unchanged list is not re-created
+    /// on every refresh.
+    lanes_from: RefCell<Option<(Vec<za2_core::buffs::BuffUptime>, u64)>>,
 }
 
 #[derive(Default)]
@@ -783,7 +786,16 @@ fn apply_timeline(app: &App, ui: &Ui) {
             None => ("Effects on the target".into(), None),
         },
     };
+    let rebuild = {
+        let mut last = ui.lanes_from.borrow_mut();
+        let same = last.as_ref().is_some_and(|(list, at)| *at == seconds.to_bits() && list.as_slice() == uptimes.map_or(&[][..], |u| u.as_slice()));
+        if !same {
+            *last = Some((uptimes.cloned().unwrap_or_default(), seconds.to_bits()));
+        }
+        !same
+    };
     let lanes: Vec<BuffLane> = uptimes
+        .filter(|_| rebuild)
         .into_iter()
         .flatten()
         .take(80)
@@ -802,7 +814,9 @@ fn apply_timeline(app: &App, ui: &Ui) {
             )),
         })
         .collect();
-    app.set_buff_lanes(ModelRc::new(VecModel::from(lanes)));
+    if rebuild {
+        app.set_buff_lanes(ModelRc::new(VecModel::from(lanes)));
+    }
     app.set_buff_title(if selected >= 0 { title } else { "Effects".into() }.into());
     app.set_buff_empty(
         if selected < 0 { "Select a player in the legend above or on the Meter tab to see the effects on them" } else { "No timed effects" }.into(),
@@ -1138,6 +1152,23 @@ fn apply_filters(app: &App, ui: &Ui) {
     app.set_monster_summary(summary.into());
 }
 
+/// A fingerprint of the live inputs the markers depend on, to the metre: equal fingerprints draw the same markers.
+fn scene_key(live: &LiveInputs) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let metre = |v: f32| (v / 100.0).round() as i64;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (live.known, metre(live.player.0), metre(live.player.1), live.player_z.map(metre), live.show_live_mobs, live.show_cubes).hash(&mut h);
+    for e in live.env {
+        (&e.key, &e.kind, metre(e.x), metre(e.y), metre(e.z)).hash(&mut h);
+    }
+    if live.show_live_mobs {
+        for m in live.mobs {
+            (m.entity, m.npc, metre(m.x), metre(m.y), metre(m.z)).hash(&mut h);
+        }
+    }
+    h.finish()
+}
+
 fn apply_map(app: &App, ui: &mut Ui, force: bool) {
     let map = displayed_map(ui);
     let position = ui.snapshot.position.clone();
@@ -1152,22 +1183,7 @@ fn apply_map(app: &App, ui: &mut Ui, force: bool) {
     if width < 10.0 || height < 10.0 {
         return;
     }
-    let key = (
-        map.key.clone(),
-        (ui.map.center.0.round() as i64, ui.map.center.1.round() as i64),
-        (ui.settings.map_radius_metres * 10.0) as i64,
-        (width as i64, height as i64),
-        ui.snapshot.version,
-    );
-    if !force && ui.map.last_built.as_ref() == Some(&key) {
-        return;
-    }
-    ui.map.last_built = Some(key);
-
     let view = View { center_x: ui.map.center.0, center_y: ui.map.center.1, radius_metres: ui.settings.map_radius_metres, width, height };
-    let faction = faction_of(&ui.snapshot);
-    ui.map.layer.update(Some(map), &ui.settings.gather_items, &ui.settings.pets, &ui.settings.monsters, faction);
-    let quads = map::visible_tiles(map, &view, &mut ui.loader);
     let known = tracked_here && position.as_ref().is_some_and(|p| matches!(p.state, PositionState::Exact | PositionState::Estimated));
     let live = LiveInputs {
         known,
@@ -1178,9 +1194,23 @@ fn apply_map(app: &App, ui: &mut Ui, force: bool) {
         show_live_mobs: ui.settings.show_live_mobs,
         show_cubes: ui.settings.show_cubes,
     };
-    map::markers(map, &view, &ui.map.layer, &live, &mut ui.map.markers);
-    app.set_tiles(to_tiles(quads));
-    app.set_markers(to_markers(&ui.map.markers));
+    let key = (
+        map.key.clone(),
+        (ui.map.center.0.round() as i64, ui.map.center.1.round() as i64),
+        (ui.settings.map_radius_metres * 10.0) as i64,
+        (width as i64, height as i64),
+        scene_key(&live),
+    );
+    // Tiles and markers are rebuilt only when what they show changed: a new model re-creates every marker element.
+    if force || ui.map.last_built.as_ref() != Some(&key) {
+        ui.map.last_built = Some(key);
+        let faction = faction_of(&ui.snapshot);
+        ui.map.layer.update(Some(map), &ui.settings.gather_items, &ui.settings.pets, &ui.settings.monsters, faction);
+        let quads = map::visible_tiles(map, &view, &mut ui.loader);
+        map::markers(map, &view, &ui.map.layer, &live, &mut ui.map.markers);
+        app.set_tiles(to_tiles(quads));
+        app.set_markers(to_markers(&ui.map.markers));
+    }
 
     match position.as_ref().filter(|_| tracked_here) {
         Some(p) => {
@@ -1260,14 +1290,7 @@ fn apply_map_overlay(overlay: &MapOverlay, ui: &mut Ui, force: bool) {
         return;
     }
     let center = (p.x as f64 + ui.overlay_pan.0, p.y as f64 + ui.overlay_pan.1);
-    let key = (map.key.clone(), (center.0 as i64, center.1 as i64), (width as i64, height as i64), ui.snapshot.version);
-    if !force && ui.map.last_overlay.as_ref() == Some(&key) {
-        return;
-    }
-    ui.map.last_overlay = Some(key);
     let view = View { center_x: center.0, center_y: center.1, radius_metres: ui.settings.overlay_radius_metres, width, height };
-    ui.map.overlay_layer.update(Some(map), &ui.settings.gather_items, &ui.settings.pets, &ui.settings.monsters, faction_of(&ui.snapshot));
-    let quads = map::visible_tiles(map, &view, &mut ui.loader);
     let live = LiveInputs {
         known: matches!(p.state, PositionState::Exact | PositionState::Estimated),
         player: (p.x, p.y),
@@ -1277,10 +1300,16 @@ fn apply_map_overlay(overlay: &MapOverlay, ui: &mut Ui, force: bool) {
         show_live_mobs: ui.settings.show_live_mobs,
         show_cubes: ui.settings.show_cubes,
     };
-    let mut markers = Vec::new();
-    map::markers(map, &view, &ui.map.overlay_layer, &live, &mut markers);
-    overlay.set_tiles(to_tiles(quads));
-    overlay.set_markers(to_markers(&markers));
+    let key = (map.key.clone(), (center.0 as i64, center.1 as i64), (width as i64, height as i64), scene_key(&live));
+    if force || ui.map.last_overlay.as_ref() != Some(&key) {
+        ui.map.last_overlay = Some(key);
+        ui.map.overlay_layer.update(Some(map), &ui.settings.gather_items, &ui.settings.pets, &ui.settings.monsters, faction_of(&ui.snapshot));
+        let quads = map::visible_tiles(map, &view, &mut ui.loader);
+        let mut markers = Vec::new();
+        map::markers(map, &view, &ui.map.overlay_layer, &live, &mut markers);
+        overlay.set_tiles(to_tiles(quads));
+        overlay.set_markers(to_markers(&markers));
+    }
     let (me_x, me_y) = view.to_screen(map, p.x as f64, p.y as f64);
     overlay.set_me_visible(p.state != PositionState::Unknown);
     overlay.set_me_x(me_x as f32);
@@ -1491,6 +1520,7 @@ fn main() {
         sound_test: None,
         selections: Rc::new(Selections::new()),
         overlay_pan: (0.0, 0.0),
+        lanes_from: RefCell::new(None),
     }));
 
     app.set_map_names(ModelRc::new(VecModel::from(maps::all().iter().map(|m| SharedString::from(m.title.as_str())).collect::<Vec<_>>())));

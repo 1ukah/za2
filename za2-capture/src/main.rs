@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 const MSG_SEGMENT: u8 = 1;
 const MSG_STATUS: u8 = 2;
 const MSG_STATS: u8 = 3;
-const KERNEL_BUFFER_BYTES: i32 = 32 * 1024 * 1024;
+// Game traffic is a few KB/s; with immediate mode every packet takes a ~64 KB frame of this ring, so it stays resident.
+const KERNEL_BUFFER_BYTES: i32 = 8 * 1024 * 1024;
 const RESCAN_INTERVAL: Duration = Duration::from_secs(5);
 const STATS_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -281,6 +282,14 @@ fn main() {
     if options.list {
         list_devices();
         return;
+    }
+
+    // stdin closes when za2 ends, even when it crashes or is killed; without this the capture outlives it while waiting.
+    if std::env::var_os("ZA2_EXIT_WITH_PARENT").is_some() {
+        std::thread::spawn(|| {
+            let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
+            std::process::exit(0);
+        });
     }
 
     let mut out = Output { out: BufWriter::with_capacity(256 * 1024, std::io::stdout()) };

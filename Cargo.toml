@@ -10,3 +10,4 @@ license = "MIT"
 lto = "thin"
 codegen-units = 4
 debug = false
+strip = true

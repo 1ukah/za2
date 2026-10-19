@@ -34,7 +34,8 @@ pub struct HitPoints {
 
 const RESET_FROM_BELOW: f64 = 0.95;
 const RESET_RISE: f64 = 0.10;
-const MAX_SAMPLES_PER_ENTITY: usize = 20_000;
+/// Only the latest sample is read; a short history is kept per entity because a track lives as long as the directory.
+const MAX_SAMPLES_PER_ENTITY: usize = 256;
 
 impl HitPoints {
     pub fn note(&mut self, entity: i32, at: Micros, hp: i64) {
@@ -255,9 +256,24 @@ impl EntityDirectory {
         let renamed = matches!(previous_id, Some(old) if old != info.combat_id) && previous_name.as_deref() == Some(info.name.as_str());
         if renamed {
             self.forget_place();
-            self.local_id_changes.push((previous_id.unwrap(), info.combat_id));
+            self.move_local_id(previous_id.unwrap(), info.combat_id);
         }
         self.character = Some(info);
+    }
+
+    /// The local player got a new combat id (a new zone): its class goes along, so the events merged onto the new id still
+    /// count as a player's before it casts again.
+    fn move_local_id(&mut self, from: i32, to: i32) {
+        if let Some(votes) = self.class_votes.get(&from).cloned() {
+            for (class, count) in votes {
+                let to_votes = self.class_votes.entry(to).or_default();
+                match to_votes.iter_mut().find(|v| v.0 == class) {
+                    Some(v) => v.1 += count,
+                    None => to_votes.push((class, count)),
+                }
+            }
+        }
+        self.local_id_changes.push((from, to));
     }
 
     /// An own-stats record about `id`: three in a row about another entity move the local player there (a new zone), keeping
@@ -278,7 +294,11 @@ impl EntityDirectory {
         self.self_stats_streak = None;
         match self.character.clone() {
             Some(info) => self.set_local_character(CharacterInfo { combat_id: id, ..info }),
-            None => self.explicit_local_id = Some(id),
+            None => {
+                if let Some(previous) = self.explicit_local_id.replace(id) {
+                    self.move_local_id(previous, id);
+                }
+            }
         }
     }
 
@@ -794,5 +814,18 @@ mod tests {
         d.note_mob_position(7, 1234, 100.0, 200.0, 50.0, SECOND);
         d.note_movement(7, 150.0, 260.0, 70.0, 2 * SECOND);
         assert_eq!(d.live_mobs().copied().collect::<Vec<_>>(), vec![LiveMob { entity: 7, npc: 1234, x: 150.0, y: 260.0, z: 70.0 }]);
+    }
+
+    #[test]
+    fn a_new_local_id_keeps_the_class() {
+        let mut d = EntityDirectory::new();
+        let kat = |id| CharacterInfo { combat_id: id, name: "Kat".into(), class_code: 0, level: 0, server_id: 1001, received_at: 0 };
+        d.set_local_character(kat(2005));
+        d.note_class(2005, "Sorcerer");
+        d.set_local_character(kat(7001));
+        assert_eq!(d.drain_local_id_changes(), vec![(2005, 7001)]);
+        assert!(d.is_known_player(7001));
+        assert_eq!(d.class_of(7001), Some("Sorcerer"));
+        assert_eq!(d.name_for(7001).as_deref(), Some("Kat"));
     }
 }

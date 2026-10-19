@@ -33,6 +33,8 @@ pub struct BuffTimeline {
     spans: Vec<BuffSpan>,
     open: HashMap<(i32, i64), usize>,
     last_sweep: Micros,
+    /// Goes up with every change, so readers can tell when to recompute.
+    pub version: u64,
 }
 
 /// How long an effect was on a target in a time window.
@@ -66,6 +68,7 @@ impl BuffTimeline {
     }
 
     pub fn note(&mut self, e: &BuffEvent) {
+        self.version += 1;
         let key = (e.target, e.instance);
         match e.change {
             BuffChange::On => {
@@ -114,6 +117,9 @@ impl BuffTimeline {
 
     fn close_where(&mut self, at: Micros, mut done: impl FnMut(&BuffSpan) -> bool) {
         let keys: Vec<(i32, i64)> = self.open.iter().filter(|(_, &i)| done(&self.spans[i])).map(|(k, _)| *k).collect();
+        if !keys.is_empty() {
+            self.version += 1;
+        }
         for key in keys {
             self.close(key, at);
         }
@@ -148,6 +154,7 @@ impl BuffTimeline {
 
     /// The entity's combat id changed (a new map): its spans follow it.
     pub fn merge_ids(&mut self, from: i32, to: i32) {
+        self.version += 1;
         for span in &mut self.spans {
             if span.target == from {
                 span.target = to;
@@ -167,6 +174,7 @@ impl BuffTimeline {
     pub fn forget_before(&mut self, before: Micros) {
         if self.spans.iter().any(|s| s.end.is_some_and(|e| e < before)) {
             self.retain(|s| s.end.is_none_or(|e| e >= before));
+            self.version += 1;
         }
     }
 

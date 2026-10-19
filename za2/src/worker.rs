@@ -57,6 +57,7 @@ pub struct Counters {
     pub helper_received: u32,
     pub helper_dropped: u32,
     pub helper_if_dropped: u32,
+    /// Times the capture reader found the decoder queue full and had to wait.
     pub queue_dropped: u64,
 }
 
@@ -223,7 +224,9 @@ fn spawn_helper(helper: &PathBuf, ports: &[u16], device: &Option<String>, tx: Sy
     if let Some(d) = device {
         command.arg("--device").arg(d);
     }
-    let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    // The helper exits when its stdin closes, which happens however this process ends.
+    command.env("ZA2_EXIT_WITH_PARENT", "1");
+    let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
     let err_tx = tx.clone();
@@ -240,16 +243,14 @@ fn spawn_helper(helper: &PathBuf, ports: &[u16], device: &Option<String>, tx: Sy
         loop {
             match read_message(&mut reader) {
                 Ok(message) => {
-                    let blocking = !matches!(message, CaptureMessage::Segment(_));
-                    let result = if blocking { tx.send(Input::Message(message)).map_err(|_| ()) } else {
-                        match tx.try_send(Input::Message(message)) {
-                            Ok(()) => Ok(()),
-                            Err(TrySendError::Full(_)) => {
-                                dropped.fetch_add(1, Ordering::Relaxed);
-                                Ok(())
-                            }
-                            Err(TrySendError::Disconnected(_)) => Err(()),
+                    // A dropped segment would break the TCP stream, so a full queue waits; the kernel ring absorbs the burst.
+                    let result = match tx.try_send(Input::Message(message)) {
+                        Ok(()) => Ok(()),
+                        Err(TrySendError::Full(input)) => {
+                            dropped.fetch_add(1, Ordering::Relaxed);
+                            tx.send(input).map_err(|_| ())
                         }
+                        Err(TrySendError::Disconnected(_)) => Err(()),
                     };
                     if result.is_err() {
                         return;
@@ -308,6 +309,8 @@ struct Worker {
     dirty: bool,
     tracked_at: Micros,
     memory: MemoryLink,
+    /// What the skills and timelines of the snapshot were computed from: (combat, fight, buffs) versions and the selection.
+    derived_from: Option<(u64, u64, u64, Vec<i32>)>,
 }
 
 impl Worker {
@@ -409,16 +412,21 @@ impl Worker {
         self.memory.merge(&mut s.live_mobs, now);
         s.memory_status = self.memory.describe();
         s.live_env = engine.decoder.entities.live_env(now);
-        s.skills = self
-            .selected
-            .iter()
-            .map(|&id| {
-                let c = &engine.combat;
-                (id, SkillSets { damage: c.skill_breakdown(id, false), heal: c.skill_breakdown(id, true), taken: c.taken_breakdown(id) })
-            })
-            .collect();
-        s.fight_timeline = Arc::new(timeline_of(&engine.fight, &engine.buffs, &engine.decoder.entities, &self.selected));
-        s.timeline = Arc::new(timeline_of(&engine.combat, &engine.buffs, &engine.decoder.entities, &self.selected));
+        // These scan every event of the logs: only when the logs changed, not on every position or status update.
+        let derived_from = (engine.combat.version, engine.fight.version, engine.buffs.version, self.selected.clone());
+        if self.derived_from.as_ref() != Some(&derived_from) {
+            self.derived_from = Some(derived_from);
+            s.skills = self
+                .selected
+                .iter()
+                .map(|&id| {
+                    let c = &engine.combat;
+                    (id, SkillSets { damage: c.skill_breakdown(id, false), heal: c.skill_breakdown(id, true), taken: c.taken_breakdown(id) })
+                })
+                .collect();
+            s.fight_timeline = Arc::new(timeline_of(&engine.fight, &engine.buffs, &engine.decoder.entities, &self.selected));
+            s.timeline = Arc::new(timeline_of(&engine.combat, &engine.buffs, &engine.decoder.entities, &self.selected));
+        }
         if engine.field_bosses_changed {
             engine.field_bosses_changed = false;
             s.field_bosses = Arc::new(engine.field_bosses.clone());
@@ -513,6 +521,7 @@ fn run(source: Source, own_name: String, reset_on_zone: bool, shared: Arc<Shared
         }),
         sessions: load_sessions(),
         sessions_changed: true,
+        derived_from: None,
     };
 
     let (tx, rx) = sync_channel::<Input>(QUEUE_CAPACITY);
@@ -726,7 +735,7 @@ fn player_rows(log: &CombatLog, entities: &EntityDirectory) -> Vec<Row> {
     ids.extend(healing.keys().copied());
     let mut rows: Vec<Row> = Vec::new();
     for id in ids {
-        if !entities.is_known_player(id) {
+        if !entities.is_known_player(id) && Some(id) != local {
             continue;
         }
         let stats = log.damage_by_source().get(&id).cloned().unwrap_or_default();

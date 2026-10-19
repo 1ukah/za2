@@ -142,6 +142,11 @@ pub fn find_game() -> Option<Game> {
     let mut best: Option<(u64, i32, u64)> = None;
     for entry in std::fs::read_dir("/proc").ok()?.flatten() {
         let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse::<i32>().ok()) else { continue };
+        // A short cmdline check first: the maps of every browser and editor run to megabytes.
+        let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else { continue };
+        if !cmdline.to_ascii_lowercase().windows(5).any(|w| w == b"aion2") {
+            continue;
+        }
         let Ok(maps) = std::fs::read_to_string(format!("/proc/{pid}/maps")) else { continue };
         let Some(base) = parse_maps(&maps).iter().find(|r| r.path.to_ascii_lowercase().ends_with("/aion2.exe")).map(|r| r.start) else { continue };
         let rss = std::fs::read_to_string(format!("/proc/{pid}/statm")).ok().and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok()).unwrap_or(0);

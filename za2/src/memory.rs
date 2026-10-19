@@ -156,7 +156,7 @@ impl MemoryLink {
             return;
         }
         self.restart_at = None;
-        let spawned = Command::new(helper).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn();
+        let spawned = Command::new(helper).env("ZA2_EXIT_WITH_PARENT", "1").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn();
         let mut child = match spawned {
             Ok(c) => c,
             Err(e) => {

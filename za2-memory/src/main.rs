@@ -56,6 +56,10 @@ fn commands() -> Receiver<MemoryCommand> {
                 }
             }
         }
+        // stdin closes when za2 ends, even when it crashes or is killed.
+        if std::env::var_os("ZA2_EXIT_WITH_PARENT").is_some() {
+            std::process::exit(0);
+        }
     });
     rx
 }

@@ -86,6 +86,8 @@ impl Engine {
         });
         self.events += self.scratch.len() as u64;
 
+        // Before a zone change saves the session, so the session's events sit on the local player's current id.
+        self.apply_local_id_changes();
         for change in self.decoder.drain_zone_changes() {
             if self.reset_on_zone_change {
                 self.finish_session(change.timestamp);
@@ -119,14 +121,18 @@ impl Engine {
             }
         }
         self.fight.ingest(&self.scratch);
+        self.apply_local_id_changes();
+        for (summon, owner) in self.decoder.entities.drain_resolved_owners() {
+            self.combat.reattribute(summon, owner);
+            self.fight.reattribute(summon, owner);
+        }
+    }
+
+    fn apply_local_id_changes(&mut self) {
         for (from, to) in self.decoder.entities.drain_local_id_changes() {
             self.combat.merge_ids(from, to);
             self.fight.merge_ids(from, to);
             self.buffs.merge_ids(from, to);
-        }
-        for (summon, owner) in self.decoder.entities.drain_resolved_owners() {
-            self.combat.reattribute(summon, owner);
-            self.fight.reattribute(summon, owner);
         }
     }
 
