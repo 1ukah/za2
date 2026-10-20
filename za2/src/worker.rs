@@ -15,6 +15,7 @@ use za2_core::engine::Engine;
 use za2_core::combat::CombatLog;
 use za2_core::entities::{EntityDirectory, EnvObject, LiveMob};
 use za2_core::field_bosses::FieldBossBoard;
+use za2_core::pet_progress::PetBook;
 use za2_core::position::{PositionTracker, TrackedPosition};
 use za2_core::protocol::Protocol;
 use za2_core::recording;
@@ -23,6 +24,7 @@ use za2_core::sessions::{self, SessionSummary};
 use za2_core::ttk::TtkEstimator;
 
 use crate::memory::{self, MemoryLink};
+use crate::pet_tracker::{PetSource, PetTracker};
 
 const QUEUE_CAPACITY: usize = 16_384;
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(250);
@@ -139,6 +141,11 @@ pub struct Snapshot {
     pub sessions: Arc<Vec<SessionSummary>>,
     pub recording: Option<(PathBuf, u64)>,
     pub memory_status: String,
+    /// Level and progress of the own pets, and where they came from.
+    pub pets: Arc<PetBook>,
+    pub pet_source: PetSource,
+    /// The pets whose monster the local player is fighting.
+    pub target_pets: Vec<i32>,
     pub now: Micros,
 }
 
@@ -174,6 +181,9 @@ impl Default for Snapshot {
             sessions: Arc::new(Vec::new()),
             recording: None,
             memory_status: String::new(),
+            pets: Default::default(),
+            pet_source: PetSource::None,
+            target_pets: Vec::new(),
             now: 0,
         }
     }
@@ -309,6 +319,8 @@ struct Worker {
     dirty: bool,
     tracked_at: Micros,
     memory: MemoryLink,
+    pets: PetTracker,
+    pets_shown: u64,
     /// What the skills and timelines of the snapshot were computed from: (combat, fight, buffs) versions and the selection.
     derived_from: Option<(u64, u64, u64, Vec<i32>)>,
 }
@@ -349,6 +361,13 @@ impl Worker {
             self.snapshot.zone_id = change.zone_id;
             self.tracker.forget();
         }
+        // the login sends the pet list just before the character record: the list first, so the record claims it
+        for event in self.engine.decoder.drain_pet_events() {
+            if self.pets.packet(&event) {
+                self.memory.search_pets();
+            }
+        }
+        self.pets.set_character(self.engine.decoder.entities.local_character().map(|c| format!("{}@{}", c.name, c.server_id)));
         self.collect_sessions();
         if segment.from_server && segment.timestamp - self.tracked_at >= 1_000_000 {
             self.tracked_at = segment.timestamp;
@@ -411,6 +430,17 @@ impl Worker {
         s.live_mobs = engine.decoder.entities.live_mobs().copied().collect();
         self.memory.merge(&mut s.live_mobs, now);
         s.memory_status = self.memory.describe();
+        if self.pets.version != self.pets_shown || s.pet_source != self.pets.source() {
+            self.pets_shown = self.pets.version;
+            s.pets = Arc::new(self.pets.book().clone());
+            s.pet_source = self.pets.source();
+        }
+        self.pets.save(false);
+        s.target_pets = entities
+            .local_hit_target()
+            .filter(|t| now - t.1 < 60 * SECOND)
+            .and_then(|(id, _)| entities.npc_id_of(id))
+            .map_or_else(Vec::new, |npc| za2_core::catalog::pets::pets_of_npc(npc).to_vec());
         s.live_env = engine.decoder.entities.live_env(now);
         // These scan every event of the logs: only when the logs changed, not on every position or status update.
         let derived_from = (engine.combat.version, engine.fight.version, engine.buffs.version, self.selected.clone());
@@ -519,6 +549,8 @@ fn run(source: Source, own_name: String, reset_on_zone: bool, shared: Arc<Shared
             Source::Live { memory_helper, .. } => memory_helper.clone(),
             Source::Replay { .. } => None,
         }),
+        pets: PetTracker::new((!matches!(source, Source::Replay { .. })).then(|| crate::settings::data_dir().join("pets.json"))),
+        pets_shown: u64::MAX,
         sessions: load_sessions(),
         sessions_changed: true,
         derived_from: None,
@@ -577,6 +609,7 @@ fn run(source: Source, own_name: String, reset_on_zone: bool, shared: Arc<Shared
                         let _ = c.wait();
                     }
                     worker.memory.stop();
+                    worker.pets.save(true);
                     return;
                 }
             }
@@ -609,7 +642,20 @@ fn run(source: Source, own_name: String, reset_on_zone: bool, shared: Arc<Shared
 fn handle(worker: &mut Worker, input: Input, child: &mut Option<Child>, restart_at: &mut Option<Instant>) {
     match input {
         Input::Message(CaptureMessage::Segment(segment)) => worker.segment(segment),
+        Input::Memory(memory::Event::Message(za2_core::memory_stream::MemoryMessage::Pets(list))) => {
+            if worker.pets.memory(list) {
+                worker.memory.search_pets();
+            }
+            worker.dirty = true;
+        }
+        Input::Memory(memory::Event::Message(za2_core::memory_stream::MemoryMessage::NoPets)) => {
+            worker.pets.memory_gone();
+            worker.dirty = true;
+        }
         Input::Memory(event) => {
+            if matches!(event, memory::Event::Exited) {
+                worker.pets.memory_gone();
+            }
             let now = worker.now();
             let frame_done = matches!(event, memory::Event::Message(za2_core::memory_stream::MemoryMessage::Frame));
             let mobs: Vec<LiveMob> = if frame_done { worker.engine.decoder.entities.live_mobs().copied().collect() } else { Vec::new() };

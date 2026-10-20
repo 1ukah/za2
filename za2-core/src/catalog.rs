@@ -516,6 +516,8 @@ pub mod pets {
         icons: HashMap<i32, String>,
         pets_of_npc: HashMap<i32, Vec<i32>>,
         npcs_of_pet: HashMap<i32, Vec<i32>>,
+        /// The pet window's group of each pet.
+        species: HashMap<i32, &'static str>,
     }
 
     pub fn data() -> &'static Pets {
@@ -529,6 +531,20 @@ pub mod pets {
                 .filter_map(|(k, v)| {
                     let file = format!("pets/icons/{}.png", v.get("key")?.as_str()?);
                     crate::assets::path(&file).is_file().then(|| Some((k.parse().ok()?, file)))?
+                })
+                .collect();
+            // the table's creature types, named as the pet window names them
+            let species = object_entries(doc.as_ref().and_then(|d| d.get("pets")))
+                .filter_map(|(k, v)| {
+                    let name = match v.get("category")?.as_str()? {
+                        "Intellect" => "Cognia",
+                        "Feral" => "Fera",
+                        "Nature" => "Natura",
+                        "Trans" => "Varia",
+                        "Special" => "Specia",
+                        _ => return None,
+                    };
+                    Some((k.parse().ok()?, name))
                 })
                 .collect();
             let mut pets_of_npc: HashMap<i32, Vec<i32>> = HashMap::new();
@@ -550,7 +566,7 @@ pub mod pets {
             for npcs in npcs_of_pet.values_mut() {
                 npcs.sort_unstable();
             }
-            Pets { names, icons, pets_of_npc, npcs_of_pet }
+            Pets { names, icons, pets_of_npc, npcs_of_pet, species }
         })
     }
 
@@ -561,6 +577,18 @@ pub mod pets {
     /// The pet's icon, relative to the assets folder; None when it was not extracted.
     pub fn icon_of(pet_id: i32) -> Option<&'static str> {
         data().icons.get(&pet_id).map(String::as_str)
+    }
+
+    /// Every pet of the pet window.
+    pub fn all() -> Vec<i32> {
+        let mut ids: Vec<i32> = data().names.keys().copied().collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// Cognia, Fera, Natura, Varia or Specia.
+    pub fn species_of(pet_id: i32) -> Option<&'static str> {
+        data().species.get(&pet_id).copied()
     }
 
     pub fn pet_name(pet_id: i32, language: &str) -> Option<&'static str> {

@@ -9,6 +9,7 @@ pub mod entities;
 pub mod field_bosses;
 pub mod lz4;
 pub mod memory_stream;
+pub mod pet_progress;
 pub mod ping;
 pub mod position;
 pub mod protocol;

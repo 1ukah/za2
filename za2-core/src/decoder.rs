@@ -1,9 +1,10 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use crate::catalog::{bosses, gather, skills, zones};
 use crate::entities::{CharacterInfo, EntityDirectory, PartyStats};
 use crate::lz4;
+use crate::pet_progress::{self, PetEvent, PetState};
 use crate::protocol::{OpcodeFamily, Protocol};
 use crate::segment::{Micros, SECOND};
 
@@ -184,6 +185,7 @@ pub struct FrameDecoder {
     boss_reports: Vec<FieldBossReport>,
     /// Odyle energy of the own character: (basic, charged, when).
     pub odyle: Option<(u32, u32, Micros)>,
+    pet_events: Vec<PetEvent>,
 }
 
 fn read_varint(data: &[u8], pos: &mut usize) -> Option<i64> {
@@ -308,6 +310,7 @@ impl FrameDecoder {
             departures: Vec::new(),
             boss_reports: Vec::new(),
             odyle: None,
+            pet_events: Vec::new(),
         }
     }
 
@@ -333,6 +336,10 @@ impl FrameDecoder {
 
     pub fn drain_boss_reports(&mut self) -> Vec<FieldBossReport> {
         std::mem::take(&mut self.boss_reports)
+    }
+
+    pub fn drain_pet_events(&mut self) -> Vec<PetEvent> {
+        std::mem::take(&mut self.pet_events)
     }
 
     pub fn decode(&mut self, frame: &[u8], timestamp: Micros, out: &mut Vec<DamageEvent>) {
@@ -492,6 +499,9 @@ impl FrameDecoder {
             OpcodeFamily::NpcRemove => self.decode_npc_remove(frame, timestamp),
             OpcodeFamily::EnvSpawn => self.decode_env_spawn(frame, timestamp),
             OpcodeFamily::EnvRemove => self.decode_env_remove(frame),
+            OpcodeFamily::Species => self.decode_pet_list(frame),
+            OpcodeFamily::PetProgress => self.decode_pet_progress(frame),
+            OpcodeFamily::PetLevel | OpcodeFamily::PetAdded => self.decode_pet_level(frame, family == OpcodeFamily::PetAdded),
             OpcodeFamily::Unknown if opcode & 0xff == 0x37 && movement_offset(frame[0], 0).is_some() => self.decode_movement(frame, timestamp),
             OpcodeFamily::Unknown => self.stats.unknown_opcodes += 1,
             _ => {}
@@ -768,6 +778,68 @@ impl FrameDecoder {
             self.departures.push(Departure { timestamp, entity: entity as i32, died: reason == REMOVED_DIED });
         }
         self.entities.note_removed(entity as i32, reason, timestamp);
+    }
+
+    /// The pet list of the login frame (the same frame as the species knowledge), as upstream reads it: opcode | summoned
+    /// pet u32 | u32 | varint n | n x (pet id u32, pet id u32, level u32) | varint m | m x (pet id u32, progress u32). Pets that
+    /// are not unlocked are only in the second list (live EU capture 2026-10-17: 134 unlocked, 6 more with 1 to 4 kills).
+    fn decode_pet_list(&mut self, frame: &[u8]) {
+        let mut p = 6;
+        let Some(count) = read_varint(frame, &mut p).filter(|n| (1..=2000).contains(n)).map(|n| n as usize) else { return };
+        if p + count * 12 > frame.len() {
+            return;
+        }
+        let mut pets = BTreeMap::new();
+        for i in 0..count {
+            let at = p + 12 * i;
+            let id = u32_at(frame, at);
+            let level = u32_at(frame, at + 8);
+            if id != u32_at(frame, at + 4) || !(1000..=99_999).contains(&id) || level > pet_progress::MAX_LEVEL as u32 {
+                return; // not the pet list
+            }
+            pets.insert(id as i32, PetState { level: level as u8, progress: 0 });
+        }
+        p += count * 12;
+        if let Some(m) = read_varint(frame, &mut p).filter(|m| (0..=2000).contains(m)).map(|m| m as usize) {
+            if p + m * 8 <= frame.len() {
+                for i in 0..m {
+                    let (id, progress) = (u32_at(frame, p + 8 * i) as i32, u32_at(frame, p + 8 * i + 4));
+                    if progress < 1000 {
+                        pets.entry(id).or_default().progress = progress;
+                    }
+                }
+            }
+        }
+        self.pet_events.push(PetEvent::List(pets));
+    }
+
+    /// Kills counted for the local player's pets: opcode | n | n x (pet id u32, gained u32). One frame per kill of a pet's
+    /// monster, unlocked pets and not unlocked ones alike (live EU captures 2026-10-19).
+    fn decode_pet_progress(&mut self, frame: &[u8]) {
+        let Some(&count) = frame.get(2) else { return };
+        for i in 0..count as usize {
+            let at = 3 + 8 * i;
+            if at + 8 > frame.len() {
+                break;
+            }
+            let (pet, gained) = (u32_at(frame, at), u32_at(frame, at + 4));
+            if (1000..=99_999).contains(&pet) && (1..1000).contains(&gained) {
+                self.pet_events.push(PetEvent::Progress { pet: pet as i32, gained });
+            }
+        }
+    }
+
+    /// A pet reached a level (opcode | 2 bytes | pet id u32 | level u32) or was unlocked (same layout), as upstream reads them.
+    fn decode_pet_level(&mut self, frame: &[u8], added: bool) {
+        if frame.len() < 12 {
+            return;
+        }
+        let (pet, level) = (u32_at(frame, 4), u32_at(frame, 8));
+        if !(1000..=99_999).contains(&pet) || !(1..=pet_progress::MAX_LEVEL as u32).contains(&level) {
+            return;
+        }
+        let (pet, level) = (pet as i32, level as u8);
+        self.pet_events.push(if added { PetEvent::Added { pet, level } } else { PetEvent::Level { pet, level } });
     }
 
     fn decode_npc_spawn(&mut self, frame: &[u8], timestamp: Micros) {
@@ -1447,6 +1519,25 @@ mod roster_tests {
         assert_eq!((buffs[0].target, buffs[0].instance, buffs[0].abnormal, buffs[0].caster), (6759, 258, 161_900_001, 6759));
         assert_eq!((buffs[0].length_ms, buffs[0].skill, buffs[0].change), (10_000, Some(16_190_000), BuffChange::On));
         assert_eq!((buffs[1].instance, buffs[1].change), (258, BuffChange::Off { reason: 1 }));
+    }
+
+    #[test]
+    fn pet_list_and_kills() {
+        let mut decoder = FrameDecoder::new(Arc::new(Protocol::load()));
+        // the login list of a live EU capture 2026-10-17, cut to its first three pets and three progress entries; 1007 is not unlocked
+        decoder.decode_pet_list(&hex(
+            "00 90 52 04 00 00 03 ea 03 00 00 ea 03 00 00 01 00 00 00 eb 03 00 00 eb 03 00 00 01 00 00 00 ec 03 00 00 ec 03 00 00 01 00 00 00 \
+             03 ea 03 00 00 02 00 00 00 ec 03 00 00 0b 00 00 00 ef 03 00 00 03 00 00 00",
+        ));
+        let state = |level, progress| PetState { level, progress };
+        let list = BTreeMap::from([(1002, state(1, 2)), (1003, state(1, 0)), (1004, state(1, 11)), (1007, state(0, 3))]);
+        assert_eq!(decoder.drain_pet_events(), vec![PetEvent::List(list)]);
+        // a kill of a Vigilant Oculazen (live EU capture 2026-10-19)
+        decoder.decode_pet_progress(&hex("0d 90 01 27 04 00 00 01 00 00 00"));
+        assert_eq!(decoder.drain_pet_events(), vec![PetEvent::Progress { pet: 1063, gained: 1 }]);
+        // a frame of another kind under the same opcode is not a pet list
+        decoder.decode_pet_list(&hex("00 90 00 00 00 00 01 05 00 00 00 06 00 00 00 01 00 00 00"));
+        assert!(decoder.drain_pet_events().is_empty());
     }
 
     #[test]

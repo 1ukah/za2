@@ -6,7 +6,7 @@
 |---|---|
 | `za2` | The application: meter, map and overlays. It runs as a normal user and starts the helpers. |
 | `za2-capture` | Finds the game connection and captures only its traffic. It needs `cap_net_raw,cap_net_admin`. |
-| `za2-memory` | Reads your position, height, facing and map, and the positions of near NPCs, from the game memory. It needs `cap_sys_ptrace`. It is optional. |
+| `za2-memory` | Reads your position, height, facing and map, the positions of near NPCs, and the level and progress of your pets, from the game memory. It needs `cap_sys_ptrace`. It is optional. |
 | `za2-replay` | Replays and records game traffic on the command line. |
 
 `za2` looks for the helpers in the same folder as itself.
@@ -17,13 +17,19 @@
 |---|---|
 | `--replay FILE.jsonl [--speed N]` | Replay a recording. `--speed 0` replays as fast as possible. |
 | `--x11` | Use XWayland. Then always-on-top for overlays works on KDE. |
-| `--tab meter\|map\|settings` | Start on this tab. |
+| `--tab meter\|map\|timeline\|pets\|settings` | Start on this tab. |
 | `--helper PATH` | Path of `za2-capture`. |
 | `--memory-helper PATH` | Path of `za2-memory`. |
-| `--no-memory` | Do not read the game memory. Positions come from packets only. |
+| `--no-memory` | Do not read the game memory. Positions and pets come from packets only. |
 | `--assets DIR` | Folder of the game data. |
-| `--send COMMAND` | Send a command to the running za2: `show`, `reset`, `toggle-overlay`, `toggle-map-overlay`, `toggle-lock`, `map-zoom-in`, `map-zoom-out`. |
+| `--send COMMAND` | Send a command to the running za2: `show`, `reset`, `toggle-overlay`, `toggle-map-overlay`, `toggle-pet-overlay`, `toggle-lock`, `map-zoom-in`, `map-zoom-out`. |
 | `--version` | Show the version. |
+
+## Pets
+
+The Pets tab lists every pet with its level and the kills to the next level: 5 kills unlock a pet, 25 more give level 2, 75 more give level 3. Click a pet to pin it. The pet overlay shows the pinned pets, and the pet of the monster you fight.
+
+The numbers come from the game memory when `za2-memory` runs. Without it, they come from the game traffic: the full list arrives only when you log in, so start za2 before you log in. Then each kill is counted. za2 keeps the last numbers of each character for the next start.
 
 ## Shortcuts
 
@@ -32,8 +38,9 @@
 | `Ctrl+R` | Reset the meter. |
 | `Ctrl+O` | Show or hide the meter overlay. |
 | `Ctrl+M` | Show or hide the map overlay. |
+| `Ctrl+P` | Show or hide the pet overlay. |
 | `Ctrl+L` | Lock or unlock the overlays. |
-| `1`, `2`, `3` | Open the Meter, Map or Settings tab. |
+| `1`, `2`, `3`, `4` | Open the Meter, Map, Settings or Pets tab. |
 
 These keys work only when the za2 window has focus. For a global shortcut on Wayland, bind a `za2 --send` command in your desktop. On KDE Plasma: System Settings > Keyboard > Shortcuts > Add Command, for example `za2 --send toggle-overlay`.
 
@@ -43,6 +50,7 @@ These keys work only when the za2 window has focus. For a global shortcut on Way
 |---|---|
 | `~/.config/za2/settings.json` | Settings. |
 | `~/.local/share/za2/sessions.json` | Sessions, one for each zone stay. za2 keeps them for 7 days. |
+| `~/.local/share/za2/pets.json` | The level and progress of the pets of each character, from the last session. |
 | `~/.local/share/za2/recordings/` | Recordings of game traffic. |
 
 ## Overlays on KDE Plasma

@@ -3,7 +3,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-const COMMANDS: [&str; 7] = ["show", "reset", "toggle-overlay", "toggle-map-overlay", "toggle-lock", "map-zoom-in", "map-zoom-out"];
+const COMMANDS: [&str; 8] = ["show", "reset", "toggle-overlay", "toggle-map-overlay", "toggle-pet-overlay", "toggle-lock", "map-zoom-in", "map-zoom-out"];
 
 fn socket_path() -> PathBuf {
     let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);

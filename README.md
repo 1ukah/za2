@@ -13,7 +13,8 @@ za2 is a DPS meter and interactive map for Aion 2 on Linux. It reads the game tr
 - Show all players, your group or only you.
 - Use a map with your position, monsters, gathering spots and Hidden Cubes.
 - Hear a sound that becomes faster near a Hidden Cube.
-- Show the meter and the map as overlays on top of the game.
+- See the level of each pet and the kills to the next level, and pin the pets you are farming to an overlay.
+- Show the meter, the map and the pets as overlays on top of the game.
 
 ## Install
 
@@ -36,7 +37,7 @@ To remove za2, run `sudo ./install.sh --uninstall`.
 
 ## Important
 
-za2 does not change the game or its traffic. The `za2-memory` helper reads the memory of the game to get your position. To use packets only, start za2 with `--no-memory`.
+za2 does not change the game or its traffic. The `za2-memory` helper reads the memory of the game to get your position and your pets. To use packets only, start za2 with `--no-memory`.
 
 ## Screenshots
 

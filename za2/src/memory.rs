@@ -212,6 +212,8 @@ impl MemoryLink {
                 let commands = self.ids.found(actor, entity, offset);
                 self.send(commands);
             }
+            // the worker keeps the pets
+            Event::Message(MemoryMessage::Pets(_) | MemoryMessage::NoPets) => {}
             Event::Exited => {
                 let code = self.child.take().and_then(|mut c| c.wait().ok()).and_then(|s| s.code());
                 self.stdin = None;
@@ -225,6 +227,11 @@ impl MemoryLink {
                 }
             }
         }
+    }
+
+    /// Asks the helper to look for the pets again (the list it reads belongs to another character).
+    pub fn search_pets(&mut self) {
+        self.send(vec![MemoryCommand::PetSearch]);
     }
 
     pub fn own(&self) -> Option<(&SelfFix, Micros)> {

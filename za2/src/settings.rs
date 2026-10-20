@@ -54,6 +54,13 @@ pub struct Settings {
     pub cube_sound_enabled: bool,
     pub cube_sound: String,
     pub cube_sound_volume: u32,
+    /// Pets shown in the pet overlay.
+    pub pinned_pets: BTreeSet<i32>,
+    pub pet_overlay: bool,
+    /// Window size (logical pixels) of the pet overlay; None: the default size.
+    pub pet_overlay_size: Option<(f32, f32)>,
+    /// The pet overlay also shows the pet of the monster the player fights.
+    pub pet_overlay_target: bool,
 }
 
 impl Default for Settings {
@@ -83,6 +90,10 @@ impl Default for Settings {
             cube_sound_enabled: false,
             cube_sound: "ping".into(),
             cube_sound_volume: 70,
+            pinned_pets: BTreeSet::new(),
+            pet_overlay: false,
+            pet_overlay_size: None,
+            pet_overlay_target: true,
         }
     }
 }

@@ -134,6 +134,25 @@ export struct FilterRow {
     child: bool,
 }
 
+// One pet with its level and how far it is to the next: "12/25", "13 left" (or "Max").
+export struct PetRow {
+    id: int,
+    name: string,
+    // the pet window's group: Cognia, Fera, Natura, Varia, Specia
+    species: string,
+    icon: image,
+    level: int,
+    progress: string,
+    left: string,
+    // to max: "93 to max"; empty at max
+    to-max: string,
+    share: float,
+    pinned: bool,
+    // the pet of the monster the player is fighting
+    target: bool,
+    max: bool,
+}
+
 // The zodiak palette.
 export global Theme {
     out property <color> background: #101114;
@@ -181,6 +200,7 @@ global Icons {
     out property <string> pickaxe: "M14.531 12.469 6.619 20.38a1 1 0 1 1-3-3l7.912-7.912 M15.686 4.314A12.5 12.5 0 0 0 5.461 2.958 1 1 0 0 0 5.58 4.71a22 22 0 0 1 6.318 3.393 M17.7 3.7a1 1 0 0 0-1.4 0l-4.6 4.6a1 1 0 0 0 0 1.4l2.6 2.6a1 1 0 0 0 1.4 0l4.6-4.6a1 1 0 0 0 0-1.4z M19.686 8.314a12.501 12.501 0 0 1 1.356 10.225 1 1 0 0 1-1.751-.119 22 22 0 0 0-3.393-6.319";
     out property <string> play: "M 6 3 L 20 12 L 6 21 L 6 3 Z";
     out property <string> plus: "M5 12h14 M12 5v14";
+    out property <string> pin: "M12 17v5 M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z";
     out property <string> rotate-ccw: "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8 M3 3v5h5";
     out property <string> search: "M 3 11 A 8 8 0 1 0 19 11 A 8 8 0 1 0 3 11 Z M21 21 l-4.3-4.3";
     out property <string> settings: "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z M 9 12 A 3 3 0 1 0 15 12 A 3 3 0 1 0 9 12 Z";
@@ -1218,6 +1238,245 @@ component OverlayRowBar inherits Rectangle {
     }
 }
 
+// ---------------------------------------------------------------- pets
+
+// A pet's picture in a ring: lavender for the fought monster's pet, green at max.
+component PetIcon inherits Rectangle {
+    in property <image> source;
+    in property <color> ring: transparent;
+    in property <length> size: 22px;
+    width: root.size;
+    height: root.size;
+    border-radius: root.size / 2;
+    border-width: root.ring != transparent ? 2px : 0px;
+    border-color: root.ring;
+    background: Theme.surface-raised;
+    Rectangle {
+        x: 2px;
+        y: 2px;
+        width: root.size - 4px;
+        height: root.size - 4px;
+        border-radius: (root.size - 4px) / 2;
+        clip: true;
+        if root.source.width > 0: Image {
+            width: parent.width;
+            height: parent.height;
+            source: root.source;
+            image-fit: contain;
+        }
+        if root.source.width == 0: Icon {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: parent.width * 0.7;
+            height: parent.height * 0.7;
+            commands: Icons.paw-print;
+            tint: Theme.muted;
+        }
+    }
+}
+
+// Progress to the next level, with "12/25" on it.
+component PetProgressBar inherits Rectangle {
+    in property <float> share;
+    in property <string> text;
+    in property <bool> max;
+    in property <length> font-size: 11px;
+    border-radius: 4px;
+    background: #ffffff10;
+    clip: true;
+    Rectangle {
+        x: 0;
+        width: parent.width * (root.max ? 1 : root.share);
+        background: root.max ? Theme.green.with-alpha(0.35) : Theme.accent.with-alpha(0.45);
+    }
+    Text {
+        text: root.text;
+        color: Theme.text;
+        font-size: root.font-size;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// A pet in the Pets tab: a click pins it to the overlay or unpins it.
+component PetListRow inherits Rectangle {
+    in property <PetRow> data;
+    callback toggled(bool);
+    height: 40px;
+    border-radius: 7px;
+    background: touch.has-hover ? Theme.surface-hover : root.data.pinned ? #ffffff08 : transparent;
+    touch := TouchArea { clicked => { root.toggled(!root.data.pinned); } }
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 10px;
+        PetIcon {
+            y: (parent.height - self.height) / 2;
+            size: 28px;
+            source: root.data.icon;
+            ring: root.data.target ? Theme.accent : root.data.max ? Theme.green : transparent;
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Text { text: root.data.name; color: Theme.text; overflow: elide; }
+            Text { text: root.data.species; color: Theme.faint; font-size: 11px; overflow: elide; }
+        }
+        Text {
+            width: 52px;
+            text: root.data.level > 0 ? "Lv " + root.data.level : "Locked";
+            color: root.data.max ? Theme.green : root.data.level > 0 ? Theme.text : Theme.faint;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+        PetProgressBar {
+            width: 120px;
+            height: 18px;
+            y: (parent.height - self.height) / 2;
+            share: root.data.share;
+            text: root.data.progress;
+            max: root.data.max;
+        }
+        VerticalLayout {
+            width: 78px;
+            alignment: center;
+            Text { text: root.data.left; color: root.data.max ? Theme.green : Theme.text; horizontal-alignment: right; }
+            if root.data.to-max != "": Text { text: root.data.to-max; color: Theme.faint; font-size: 11px; horizontal-alignment: right; }
+        }
+        Rectangle {
+            width: 28px;
+            Icon {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 17px;
+                height: 17px;
+                commands: Icons.pin;
+                tint: root.data.pinned ? Theme.accent : touch.has-hover ? Theme.muted : #ffffff22;
+                stroke-width: root.data.pinned ? 2px : 1.4px;
+            }
+        }
+    }
+}
+
+// A pet in the pet overlay.
+component PetOverlayRow inherits Rectangle {
+    in property <PetRow> data;
+    height: 26px;
+    border-radius: 5px;
+    background: root.data.target ? Theme.accent-soft : #ffffff08;
+    HorizontalLayout {
+        padding-left: 4px;
+        padding-right: 8px;
+        spacing: 7px;
+        PetIcon {
+            y: (parent.height - self.height) / 2;
+            size: 20px;
+            source: root.data.icon;
+            ring: root.data.target ? Theme.accent : root.data.max ? Theme.green : transparent;
+        }
+        Text {
+            text: root.data.name;
+            color: root.data.target ? Theme.accent : Theme.text;
+            font-weight: root.data.target ? 700 : 500;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        Text {
+            width: 20px;
+            text: root.data.level > 0 ? "L" + root.data.level : "-";
+            color: root.data.max ? Theme.green : Theme.muted;
+            font-weight: 600;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+        }
+        PetProgressBar {
+            width: 58px;
+            height: 16px;
+            y: (parent.height - self.height) / 2;
+            share: root.data.share;
+            text: root.data.progress;
+            max: root.data.max;
+            font-size: 10px;
+        }
+        Text {
+            width: 52px;
+            text: root.data.left;
+            color: root.data.max ? Theme.green : Theme.text;
+            font-weight: 700;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+        }
+    }
+}
+
+export component PetOverlay inherits Window {
+    in property <[PetRow]> rows;
+    in property <string> header;
+    // shown when there are no rows
+    in property <string> empty-text;
+    in property <bool> locked;
+    in property <float> overlay-opacity: 0.85;
+    callback drag();
+    callback toggle-lock();
+    callback resize(int);
+    title: "za2 pet overlay";
+    icon: @image-url("brand/icon-256.png");
+    no-frame: true;
+    always-on-top: true;
+    background: transparent;
+    preferred-width: 340px;
+    preferred-height: 150px;
+    min-width: 200px;
+    min-height: 60px;
+    default-font-size: 12px;
+
+    Rectangle {
+        background: Theme.background.with-alpha(root.overlay-opacity);
+        border-radius: Theme.radius;
+        clip: true;
+        if !root.locked: TouchArea {
+            pointer-event(e) => {
+                if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                    root.drag();
+                }
+            }
+        }
+        VerticalLayout {
+            padding: 8px;
+            spacing: 4px;
+            alignment: start;
+            Text {
+                height: 20px;
+                text: root.header;
+                color: Theme.muted;
+                font-size: 11px;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+            for row in root.rows: PetOverlayRow { data: row; }
+            if root.rows.length == 0: Text {
+                text: root.empty-text;
+                color: Theme.faint;
+                font-size: 11px;
+                wrap: word-wrap;
+            }
+        }
+        if !root.locked: IconButton {
+            x: parent.width - self.width - 4px;
+            y: 4px;
+            width: 26px;
+            height: 26px;
+            icon-size: 15px;
+            boxed: true;
+            icon: Icons.lock-open;
+            clicked => { root.toggle-lock(); }
+        }
+        if !root.locked: ResizeGrips { resize(edge) => { root.resize(edge); } }
+    }
+}
+
 export component MeterOverlay inherits Window {
     in property <[OverlayRow]> rows;
     in property <string> header;
@@ -1616,6 +1875,23 @@ export component App inherits Window {
     callback clear-monsters();
     callback clear-resources();
 
+    // pets tab: every pet with its level and progress; pinned ones show in the pet overlay
+    in property <[PetRow]> pet-rows;
+    in property <string> pet-summary;
+    in property <string> pet-source;
+    in property <color> pet-source-color: Theme.muted;
+    in-out property <string> pet-query;
+    // 0 all, 1 pinned, 2 not at max yet
+    in-out property <int> pet-filter: 0;
+    in-out property <bool> pet-overlay;
+    in-out property <bool> pet-overlay-target: true;
+    callback pet-search(string);
+    callback pet-filter-changed(int);
+    callback toggle-pin(int, bool);
+    callback clear-pins();
+    callback pet-overlay-changed(bool);
+    callback pet-overlay-target-changed(bool);
+
     in-out property <bool> settings-open;
     in-out property <int> settings-tab: 0;
     in-out property <string> own-name;
@@ -1663,9 +1939,11 @@ export component App inherits Window {
                 if (e.modifiers.control && e.text == "o") { root.meter-overlay = !root.meter-overlay; root.meter-overlay-changed(root.meter-overlay); return accept; }
                 if (e.modifiers.control && e.text == "m") { root.map-overlay = !root.map-overlay; root.map-overlay-changed(root.map-overlay); return accept; }
                 if (e.modifiers.control && e.text == "l") { root.overlays-locked = !root.overlays-locked; root.lock-changed(root.overlays-locked); return accept; }
+                if (e.modifiers.control && e.text == "p") { root.pet-overlay = !root.pet-overlay; root.pet-overlay-changed(root.pet-overlay); return accept; }
                 if (e.text == "1") { root.tab = 0; return accept; }
                 if (e.text == "2") { root.tab = 1; return accept; }
                 if (e.text == "3") { root.settings-open = true; return accept; }
+                if (e.text == "4") { root.tab = 3; return accept; }
                 if (e.text == Key.Escape && root.settings-open) { root.settings-open = false; return accept; }
                 reject
             }
@@ -2042,6 +2320,85 @@ export component App inherits Window {
                             }
 
                             // map
+                            // pets
+                            if root.tab == 3: VerticalLayout {
+                                spacing: 10px;
+                                HorizontalLayout {
+                                    height: 36px;
+                                    spacing: 10px;
+                                    SearchField {
+                                        horizontal-stretch: 1;
+                                        placeholder: "Search pets or species";
+                                        text <=> root.pet-query;
+                                        edited(t) => { root.pet-search(t); }
+                                    }
+                                    SegmentBar {
+                                        y: (parent.height - self.height) / 2;
+                                        HorizontalLayout {
+                                            padding: 3px;
+                                            spacing: 2px;
+                                            Segment { text: "All"; active: root.pet-filter == 0; clicked => { root.pet-filter = 0; root.pet-filter-changed(0); } }
+                                            Segment { text: "Pinned"; active: root.pet-filter == 1; clicked => { root.pet-filter = 1; root.pet-filter-changed(1); } }
+                                            Segment { text: "Unfinished"; active: root.pet-filter == 2; clicked => { root.pet-filter = 2; root.pet-filter-changed(2); } }
+                                        }
+                                    }
+                                    Toggle {
+                                        y: (parent.height - self.height) / 2;
+                                        text: "Overlay";
+                                        checked <=> root.pet-overlay;
+                                        toggled(on) => { root.pet-overlay-changed(on); }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    height: 22px;
+                                    spacing: 10px;
+                                    padding-left: 4px;
+                                    Rectangle {
+                                        width: 8px;
+                                        height: 8px;
+                                        y: (parent.height - self.height) / 2;
+                                        border-radius: 4px;
+                                        background: root.pet-source-color;
+                                    }
+                                    Muted { text: root.pet-source; font-size: 11px; }
+                                    Muted { text: root.pet-summary; font-size: 11px; color: Theme.faint; horizontal-stretch: 1; overflow: elide; }
+                                    Text {
+                                        text: "Unpin all";
+                                        color: unpin.has-hover ? Theme.accent-hover : Theme.accent;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                        unpin := TouchArea { clicked => { root.clear-pins(); } }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    spacing: 10px;
+                                    height: 16px;
+                                    Rectangle { width: 28px; }
+                                    SectionTitle { text: "PET"; horizontal-stretch: 1; }
+                                    SectionTitle { text: "LEVEL"; width: 52px; }
+                                    SectionTitle { text: "PROGRESS"; width: 120px; horizontal-alignment: center; }
+                                    SectionTitle { text: "LEFT"; width: 78px; horizontal-alignment: right; }
+                                    SectionTitle { text: "PIN"; width: 28px; horizontal-alignment: center; }
+                                }
+                                ListView {
+                                    vertical-stretch: 1;
+                                    for row in root.pet-rows: VerticalLayout {
+                                        padding-bottom: 2px;
+                                        PetListRow {
+                                            data: row;
+                                            toggled(on) => { root.toggle-pin(row.id, on); }
+                                        }
+                                    }
+                                }
+                                if root.pet-rows.length == 0: Muted {
+                                    text: root.pet-filter == 1 ? "No pinned pets. Click a pet in All to pin it to the overlay." : "No pet matches.";
+                                    horizontal-alignment: center;
+                                    height: 40px;
+                                }
+                            }
+
                             if root.tab == 1: HorizontalLayout {
                                 spacing: 12px;
                                 VerticalLayout {
@@ -2356,6 +2713,7 @@ export component App inherits Window {
                                 HorizontalLayout { alignment: center; RailButton { icon: Icons.swords; tooltip: "Meter"; active: root.tab == 0; clicked => { root.tab = 0; } } }
                                 HorizontalLayout { alignment: center; RailButton { icon: Icons.map; tooltip: "Map"; active: root.tab == 1; clicked => { root.tab = 1; } } }
                                 HorizontalLayout { alignment: center; RailButton { icon: Icons.chart-line; tooltip: "Timeline"; active: root.tab == 2; clicked => { root.tab = 2; root.chart-resized(); } } }
+                                HorizontalLayout { alignment: center; RailButton { icon: Icons.paw-print; tooltip: "Pets"; active: root.tab == 3; clicked => { root.tab = 3; } } }
                             }
                             VerticalLayout {
                                 y: parent.height - self.preferred-height;
@@ -2515,6 +2873,8 @@ export component App inherits Window {
                                 spacing: 6px;
                                 SwitchRow { text: "Meter overlays"; shortcut: "Ctrl O"; checked <=> root.meter-overlay; toggled(on) => { root.meter-overlay-changed(on); } }
                                 SwitchRow { text: "Map overlay"; shortcut: "Ctrl M"; checked <=> root.map-overlay; toggled(on) => { root.map-overlay-changed(on); } }
+                                SwitchRow { text: "Pet overlay"; shortcut: "Ctrl P"; checked <=> root.pet-overlay; toggled(on) => { root.pet-overlay-changed(on); } }
+                                SwitchRow { text: "Pet overlay adds the pet of the monster you fight"; checked <=> root.pet-overlay-target; toggled(on) => { root.pet-overlay-target-changed(on); } }
                                 SwitchRow { text: "Lock, click through"; shortcut: "Ctrl L"; checked <=> root.overlays-locked; toggled(on) => { root.lock-changed(on); } }
                                 Rectangle { height: 12px; }
                                 Rectangle { height: 1px; background: Theme.border; }

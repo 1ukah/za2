@@ -1,9 +1,10 @@
-//! Reads the own character's position and the NPCs around it from the game's memory and writes them to stdout
+//! Reads the own character's position, the NPCs around it and the pets from the game's memory and writes them to stdout
 //! (see `za2_core::memory_stream`). Read-only: it never writes to the game or stops it.
 //!
 //! Reading another process needs `cap_sys_ptrace` when `kernel.yama.ptrace_scope` is 1:
 //! `sudo setcap cap_sys_ptrace=eip za2-memory`.
 
+mod pets;
 mod process;
 mod reader;
 mod unreal;
@@ -14,10 +15,14 @@ use std::time::{Duration, Instant};
 
 use za2_core::memory_stream::{MemoryCommand, MemoryMessage};
 
+use pets::PetReader;
 use reader::Reader;
 use unreal::Unreal;
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(100);
+/// The pets are read every third frame; an unchanged list is sent again this often, so the meter knows it is current.
+const PET_FRAMES: u32 = 3;
+const PET_REPEAT: Duration = Duration::from_secs(5);
 const WAIT_INTERVAL: Duration = Duration::from_secs(3);
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 const EPERM: i32 = 1;
@@ -66,6 +71,10 @@ fn commands() -> Receiver<MemoryCommand> {
 
 fn read_game(reader: &mut Reader, out: &mut Output, commands: &Receiver<MemoryCommand>) {
     let mut described = false;
+    let mut pets = PetReader::default();
+    let mut pet_frame = 0;
+    // what was sent last (None: `nopets`) and when
+    let mut pets_sent: Option<(Option<Vec<_>>, Instant)> = None;
     loop {
         let started = Instant::now();
         while let Ok(command) = commands.try_recv() {
@@ -75,6 +84,10 @@ fn read_game(reader: &mut Reader, out: &mut Output, commands: &Receiver<MemoryCo
                     for offset in reader.probe(actor, entity) {
                         out.send(&MemoryMessage::Found { actor, entity, offset });
                     }
+                }
+                MemoryCommand::PetSearch => {
+                    pets.search_again();
+                    pet_frame = 0;
                 }
             }
         }
@@ -97,6 +110,18 @@ fn read_game(reader: &mut Reader, out: &mut Output, commands: &Receiver<MemoryCo
             out.send(&MemoryMessage::Npc(npc));
         }
         out.send(&MemoryMessage::Frame);
+        if pet_frame == 0 {
+            let list = pets.read(&mut reader.unreal);
+            let due = match &pets_sent {
+                Some((sent, at)) => *sent != list || (list.is_some() && at.elapsed() >= PET_REPEAT),
+                None => true,
+            };
+            if due {
+                out.send(&list.clone().map_or(MemoryMessage::NoPets, MemoryMessage::Pets));
+                pets_sent = Some((list, Instant::now()));
+            }
+        }
+        pet_frame = (pet_frame + 1) % PET_FRAMES;
         out.flush();
         if let Some(rest) = FRAME_INTERVAL.checked_sub(started.elapsed()) {
             std::thread::sleep(rest);

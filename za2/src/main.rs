@@ -4,6 +4,7 @@ mod desktop;
 mod icons;
 mod map;
 mod memory;
+mod pet_tracker;
 mod settings;
 mod worker;
 
@@ -19,15 +20,21 @@ use std::time::{Duration, Instant};
 use za2_core::catalog::{gather, map_icons, maps, pets};
 use za2_core::catalog::maps::MapInfo;
 use za2_core::entities::PositionSource;
+use za2_core::pet_progress::{self, PetState};
 use za2_core::position::PositionState;
 use slint::winit_030::{winit, WinitWindowAccessor};
 use slint::{Color, ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use map::{LiveInputs, Marker, StaticLayer, TileLoader, View};
 use settings::Settings;
+use pet_tracker::PetSource;
 use worker::{CaptureState, Shared, Snapshot, Source, WorkerCommand};
 
 slint::include_modules!();
+
+/// `--tab settings` opens the settings dialog over the meter; the pets page is the fourth page.
+const SETTINGS_TAB: i32 = -1;
+const PETS_TAB: i32 = 3;
 
 struct Args {
     replay: Option<PathBuf>,
@@ -41,9 +48,9 @@ struct Args {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: za2 [--replay recording.jsonl [--speed N]] [--x11] [--tab meter|map|timeline|settings] [--helper PATH] [--memory-helper PATH | --no-memory] [--assets DIR]");
+    eprintln!("usage: za2 [--replay recording.jsonl [--speed N]] [--x11] [--tab meter|map|timeline|pets|settings] [--helper PATH] [--memory-helper PATH | --no-memory] [--assets DIR]");
     eprintln!("       za2 --version");
-    eprintln!("       za2 --send show|reset|toggle-overlay|toggle-map-overlay|toggle-lock|map-zoom-in|map-zoom-out");
+    eprintln!("       za2 --send show|reset|toggle-overlay|toggle-map-overlay|toggle-pet-overlay|toggle-lock|map-zoom-in|map-zoom-out");
     std::process::exit(2);
 }
 
@@ -64,7 +71,8 @@ fn parse_args() -> Args {
                     Some("meter") => 0,
                     Some("map") => 1,
                     Some("timeline") => 2,
-                    Some("settings") => 3,
+                    Some("settings") => SETTINGS_TAB,
+                    Some("pets") => PETS_TAB,
                     _ => usage(),
                 }
             }
@@ -185,6 +193,7 @@ struct MapState {
 /// under the mouse several times a second, which made its hover flicker and lost clicks.
 struct Models {
     rows: Rc<VecModel<MeterRow>>,
+    pet_rows: Rc<VecModel<PetRow>>,
     skills: Rc<VecModel<SkillRow>>,
     chart_lines: Rc<VecModel<ChartLine>>,
     chart_marks: Rc<VecModel<ChartMark>>,
@@ -195,12 +204,14 @@ impl Models {
     fn new(app: &App) -> Models {
         let models = Models {
             rows: Rc::new(VecModel::default()),
+            pet_rows: Rc::new(VecModel::default()),
             skills: Rc::new(VecModel::default()),
             chart_lines: Rc::new(VecModel::default()),
             chart_marks: Rc::new(VecModel::default()),
             boss_rows: Rc::new(VecModel::default()),
         };
         app.set_rows(ModelRc::from(models.rows.clone()));
+        app.set_pet_rows(ModelRc::from(models.pet_rows.clone()));
         app.set_skills(ModelRc::from(models.skills.clone()));
         app.set_chart_lines(ModelRc::from(models.chart_lines.clone()));
         app.set_chart_marks(ModelRc::from(models.chart_marks.clone()));
@@ -497,6 +508,8 @@ fn sync_model<T: Clone + PartialEq + 'static>(model: &VecModel<T>, rows: Vec<T>)
 struct Ui {
     models: Models,
     overlays: Vec<OverlayWindow>,
+    pet_overlay: PetOverlay,
+    pet_overlay_rows: Rc<VecModel<PetRow>>,
     /// When the running sound test last played (None: no test).
     sound_test: Option<Instant>,
     settings: Settings,
@@ -525,6 +538,7 @@ struct Filters {
     monster_query: String,
     /// The search of the map overlay.
     overlay_query: String,
+    pet_query: String,
     expanded: std::collections::BTreeSet<String>,
     /// Pets of the monster list that show their monsters.
     expanded_pets: std::collections::BTreeSet<i32>,
@@ -912,6 +926,88 @@ fn monster_name(npc: i32) -> String {
 
 fn pet_label(pet: i32) -> String {
     pets::pet_name(pet, "en").map_or_else(|| format!("Pet #{pet}"), str::to_string)
+}
+
+/// A pet with its level and the kills to the next one.
+fn pet_row(pet: i32, state: PetState, pinned: bool, target: bool) -> PetRow {
+    let max = state.is_max();
+    let needed = pet_progress::needed(state.level);
+    PetRow {
+        id: pet,
+        name: pet_label(pet).into(),
+        species: pets::species_of(pet).unwrap_or_default().into(),
+        icon: pets::icon_of(pet).map(icons::load).unwrap_or_default(),
+        level: state.level as i32,
+        progress: if max { "Max".into() } else { format!("{}/{needed}", state.progress).into() },
+        left: if max { "Max".into() } else { format!("{} left", state.left()).into() },
+        to_max: if max || state.level + 1 == pet_progress::MAX_LEVEL { String::new() } else { format!("{} to max", state.left_to_max()) }.into(),
+        share: if max { 1.0 } else { state.progress as f32 / needed as f32 },
+        pinned,
+        target,
+        max,
+    }
+}
+
+/// Where the pets come from, for the Pets tab and the overlay header.
+fn pet_source_text(source: PetSource) -> (&'static str, &'static str, Color) {
+    match source {
+        PetSource::Memory => ("Live from the game", "live", Color::from_rgb_u8(0x68, 0xcb, 0xa4)),
+        PetSource::Packets => ("From the game traffic", "traffic", Color::from_rgb_u8(0xa8, 0xa0, 0xff)),
+        PetSource::Saved => ("Saved from the last session; exact again at the next login", "saved", Color::from_rgb_u8(0xe5, 0xc6, 0x8a)),
+        PetSource::None => ("Not known yet: needs the memory reader, or a login while za2 runs", "unknown", Color::from_rgb_u8(0xf1, 0x7b, 0x87)),
+    }
+}
+
+/// Every pet of the pet window that matches the search and the filter (0 all, 1 pinned, 2 not at max).
+fn apply_pets(app: &App, ui: &Ui) {
+    let s = &ui.snapshot;
+    let query = ui.filters.pet_query.trim();
+    let filter = app.get_pet_filter();
+    let mut rows: Vec<PetRow> = pets::all()
+        .into_iter()
+        .filter(|&p| matches_query(&pet_label(p), query) || pets::species_of(p).is_some_and(|sp| matches_query(sp, query)))
+        .map(|p| pet_row(p, s.pets.get(p), ui.settings.pinned_pets.contains(&p), s.target_pets.contains(&p)))
+        .filter(|r| match filter {
+            1 => r.pinned,
+            2 => !r.max,
+            _ => true,
+        })
+        .collect();
+    rows.sort_by_key(|r| r.name.to_lowercase());
+    sync_model(&ui.models.pet_rows, rows);
+    let (source, _, color) = pet_source_text(s.pet_source);
+    app.set_pet_source(source.into());
+    app.set_pet_source_color(color);
+    let all = pets::all().len();
+    let summary = format!(
+        "·  {} of {all} unlocked  ·  {} at max  ·  {} pinned",
+        s.pets.unlocked(),
+        s.pets.maxed(),
+        ui.settings.pinned_pets.len()
+    );
+    app.set_pet_summary(summary.into());
+}
+
+/// The pet overlay: the pet of the monster the player fights first (when it is not pinned), then the pinned pets by name.
+/// Its height follows the rows; the width is the user's.
+fn apply_pet_overlay(ui: &Ui) {
+    let s = &ui.snapshot;
+    let pinned = &ui.settings.pinned_pets;
+    let mut ids: Vec<i32> = if ui.settings.pet_overlay_target { s.target_pets.iter().copied().filter(|p| !pinned.contains(p)).collect() } else { Vec::new() };
+    let mut by_name: Vec<i32> = pinned.iter().copied().collect();
+    by_name.sort_by_key(|&p| pet_label(p).to_lowercase());
+    ids.extend(by_name);
+    let rows: Vec<PetRow> = ids.into_iter().map(|p| pet_row(p, s.pets.get(p), pinned.contains(&p), s.target_pets.contains(&p))).collect();
+    let count = rows.len();
+    sync_model(&ui.pet_overlay_rows, rows);
+    let (_, source, _) = pet_source_text(s.pet_source);
+    let o = &ui.pet_overlay;
+    o.set_header(format!("Pets  ·  {source}").into());
+    let width = ui.settings.pet_overlay_size.map_or(340.0, |s| s.0);
+    let height = 8.0 * 2.0 + 20.0 + 4.0 + count.max(1) as f32 * 30.0;
+    if logical_size(o.window()) != (width, height) {
+        o.window().set_size(slint::LogicalSize::new(width, height));
+    }
 }
 
 /// " · Elite" for the ranks above normal.
@@ -1342,6 +1438,13 @@ fn remember_overlay_sizes(ui: &mut Ui, map_overlay: &MapOverlay) {
             }
         }
     }
+    if ui.settings.pet_overlay && ui.pet_overlay.window().is_visible() {
+        let size = logical_size(ui.pet_overlay.window());
+        if size.0 >= 1.0 && ui.settings.pet_overlay_size.map(|s| s.0) != Some(size.0) {
+            ui.settings.pet_overlay_size = Some(size);
+            changed = true;
+        }
+    }
     if ui.settings.map_overlay && map_overlay.window().is_visible() {
         let size = logical_size(map_overlay.window());
         if size.0 >= 1.0 && ui.settings.map_overlay_size != Some(size) {
@@ -1486,6 +1589,12 @@ fn main() {
 
     let app = App::new().expect("cannot create the main window");
     let map_overlay = MapOverlay::new().expect("cannot create the map overlay");
+    let pet_overlay = PetOverlay::new().expect("cannot create the pet overlay");
+    let pet_overlay_rows = Rc::new(VecModel::default());
+    pet_overlay.set_rows(ModelRc::from(pet_overlay_rows.clone()));
+    pet_overlay.set_empty_text("Pin pets in the Pets tab of za2.".into());
+    pet_overlay.set_locked(settings.overlays_locked);
+    pet_overlay.set_overlay_opacity(settings.overlay_opacity);
 
     let start_map = settings.last_map.as_deref().and_then(maps::by_key).unwrap_or_else(|| &maps::all()[0]);
     let center = match (settings.last_x, settings.last_y) {
@@ -1517,6 +1626,8 @@ fn main() {
         filters: Filters::default(),
         models: Models::new(&app),
         overlays: Vec::new(),
+        pet_overlay: pet_overlay.clone_strong(),
+        pet_overlay_rows,
         sound_test: None,
         selections: Rc::new(Selections::new()),
         overlay_pan: (0.0, 0.0),
@@ -1537,9 +1648,11 @@ fn main() {
     app.set_overlays_locked(settings.overlays_locked);
     app.set_overlay_opacity(settings.overlay_opacity);
     app.set_overlay_radius(settings.overlay_radius_metres as f32);
-    app.set_tab(if args.tab == 3 { 0 } else { args.tab });
-    app.set_settings_open(args.tab == 3);
+    app.set_tab(args.tab.max(0));
+    app.set_settings_open(args.tab == SETTINGS_TAB);
     app.set_meter_range(settings.meter_range as i32);
+    app.set_pet_overlay(settings.pet_overlay);
+    app.set_pet_overlay_target(settings.pet_overlay_target);
     map_overlay.set_locked(settings.overlays_locked);
     map_overlay.set_overlay_opacity(settings.overlay_opacity);
     apply_filters(&app, &ui.borrow());
@@ -2089,6 +2202,12 @@ fn main() {
                     }
                 }
             }
+            u.pet_overlay.set_locked(locked);
+            if u.settings.pet_overlay {
+                if let Err(e) = set_click_through(u.pet_overlay.window(), locked) {
+                    errors.push(e);
+                }
+            }
             if !errors.is_empty() {
                 eprintln!("za2: click-through is not available here: {}", errors.join("; "));
             }
@@ -2104,6 +2223,7 @@ fn main() {
             for m in &u.overlays {
                 m.window.set_overlay_opacity(v);
             }
+            u.pet_overlay.set_overlay_opacity(v);
             mapo.unwrap().set_overlay_opacity(v);
         });
     }
@@ -2154,6 +2274,91 @@ fn main() {
         });
         let app_weak = app.as_weak();
         map_overlay.on_toggle_lock(move || {
+            let app = app_weak.unwrap();
+            app.set_overlays_locked(true);
+            app.invoke_lock_changed(true);
+        });
+    }
+
+    {
+        let ui = ui.clone();
+        let weak = app.as_weak();
+        app.on_pet_search(move |text| {
+            let mut u = ui.borrow_mut();
+            u.filters.pet_query = text.to_string();
+            apply_pets(&weak.unwrap(), &u);
+        });
+    }
+    {
+        let ui = ui.clone();
+        let weak = app.as_weak();
+        app.on_pet_filter_changed(move |_| apply_pets(&weak.unwrap(), &ui.borrow()));
+    }
+    {
+        let ui = ui.clone();
+        let weak = app.as_weak();
+        app.on_toggle_pin(move |pet, on| {
+            let mut u = ui.borrow_mut();
+            if on {
+                u.settings.pinned_pets.insert(pet);
+            } else {
+                u.settings.pinned_pets.remove(&pet);
+            }
+            u.settings.save();
+            apply_pets(&weak.unwrap(), &u);
+            apply_pet_overlay(&u);
+        });
+    }
+    {
+        let ui = ui.clone();
+        let weak = app.as_weak();
+        app.on_clear_pins(move || {
+            let mut u = ui.borrow_mut();
+            u.settings.pinned_pets.clear();
+            u.settings.save();
+            apply_pets(&weak.unwrap(), &u);
+            apply_pet_overlay(&u);
+        });
+    }
+    {
+        let ui = ui.clone();
+        app.on_pet_overlay_target_changed(move |on| {
+            let mut u = ui.borrow_mut();
+            u.settings.pet_overlay_target = on;
+            u.settings.save();
+            apply_pet_overlay(&u);
+        });
+    }
+    {
+        let ui = ui.clone();
+        let overlay = pet_overlay.as_weak();
+        app.on_pet_overlay_changed(move |on| {
+            let mut u = ui.borrow_mut();
+            u.settings.pet_overlay = on;
+            u.settings.save();
+            let o = overlay.unwrap();
+            if on {
+                apply_pet_overlay(&u);
+                let _ = o.show();
+                let locked = u.settings.overlays_locked;
+                let weak = o.as_weak();
+                slint::Timer::single_shot(Duration::from_millis(300), move || {
+                    if let Some(o) = weak.upgrade() {
+                        let _ = set_click_through(o.window(), locked);
+                    }
+                });
+            } else {
+                let _ = o.hide();
+            }
+        });
+    }
+    {
+        let weak = pet_overlay.as_weak();
+        pet_overlay.on_drag(move || move_window(&weak.unwrap()));
+        let weak = pet_overlay.as_weak();
+        pet_overlay.on_resize(move |edge| resize_window(&weak.unwrap(), resize_direction(edge)));
+        let app_weak = app.as_weak();
+        pet_overlay.on_toggle_lock(move || {
             let app = app_weak.unwrap();
             app.set_overlays_locked(true);
             app.invoke_lock_changed(true);
@@ -2226,6 +2431,12 @@ fn main() {
                 }
                 apply_meter(&app, &u);
                 apply_status(&app, &u);
+                if app.get_tab() == PETS_TAB {
+                    apply_pets(&app, &u);
+                }
+                if u.settings.pet_overlay {
+                    apply_pet_overlay(&u);
+                }
                 if app.get_tab() == 1 && app.get_filter_tab() == 2 {
                     apply_bosses(&app, &u);
                 }
@@ -2237,6 +2448,9 @@ fn main() {
                         app.set_own_name(name.into());
                     }
                 }
+            }
+            if app.get_tab() == PETS_TAB && app.get_pet_rows().row_count() == 0 && app.get_pet_filter() == 0 && u.filters.pet_query.is_empty() {
+                apply_pets(&app, &u);
             }
             let shown = displayed_map(&u).key.clone();
             if filters_for.as_deref() != Some(shown.as_str()) {
@@ -2279,6 +2493,11 @@ fn main() {
                         app.set_map_overlay(on);
                         app.invoke_map_overlay_changed(on);
                     }
+                    "toggle-pet-overlay" => {
+                        let on = !app.get_pet_overlay();
+                        app.set_pet_overlay(on);
+                        app.invoke_pet_overlay_changed(on);
+                    }
                     "toggle-lock" => {
                         let on = !app.get_overlays_locked();
                         app.set_overlays_locked(on);
@@ -2301,11 +2520,15 @@ fn main() {
     if settings.map_overlay {
         app.invoke_map_overlay_changed(true);
     }
+    if settings.pet_overlay {
+        app.invoke_pet_overlay_changed(true);
+    }
     slint::run_event_loop_until_quit().ok();
     for m in &ui.borrow().overlays {
         let _ = m.window.hide();
     }
     let _ = map_overlay.hide();
+    let _ = pet_overlay.hide();
     let u = ui.borrow();
     u.settings.save();
     control::cleanup();

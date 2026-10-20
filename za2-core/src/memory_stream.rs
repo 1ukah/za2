@@ -7,10 +7,14 @@
 //! - `npc <actor> <entity> <x> <y> <z>`: an NPC actor; actor is its address in hex, entity the server id (0 = unknown)
 //! - `frame`: the NPC list since the previous `frame` is complete
 //! - `found <actor> <entity> <offset>`: answer to `probe`, the entity id sits at this offset in the actor
+//! - `pets <pet>:<level>:<progress> ...`: the local player's pets, every one with a level or progress; sent when they change
+//!   and every few seconds
+//! - `nopets`: the pets cannot be read (character select, or the game's layout changed)
 //!
 //! Meter to helper:
 //! - `probe <actor> <entity>`: search the actor for this server id
 //! - `idoffset <offset>`: where NPC actors keep their server id (0 = unknown)
+//! - `petsearch`: look for the pets again (another character logged in)
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SelfFix {
@@ -30,6 +34,8 @@ pub struct NpcActor {
     pub z: f32,
 }
 
+use crate::pet_progress::PetState;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum MemoryMessage {
     Status(String),
@@ -38,6 +44,8 @@ pub enum MemoryMessage {
     Npc(NpcActor),
     Frame,
     Found { actor: u64, entity: i32, offset: usize },
+    Pets(Vec<(i32, PetState)>),
+    NoPets,
 }
 
 impl MemoryMessage {
@@ -49,6 +57,14 @@ impl MemoryMessage {
             MemoryMessage::Npc(n) => format!("npc {:x} {} {} {} {}", n.actor, n.entity, n.x, n.y, n.z),
             MemoryMessage::Frame => "frame".into(),
             MemoryMessage::Found { actor, entity, offset } => format!("found {actor:x} {entity} {offset}"),
+            MemoryMessage::Pets(pets) => {
+                let mut line = String::from("pets");
+                for (pet, s) in pets {
+                    line.push_str(&format!(" {pet}:{}:{}", s.level, s.progress));
+                }
+                line
+            }
+            MemoryMessage::NoPets => "nopets".into(),
         }
     }
 
@@ -59,6 +75,16 @@ impl MemoryMessage {
         Some(match kind {
             "status" => MemoryMessage::Status(rest.to_string()),
             "noself" => MemoryMessage::NoSelf,
+            "nopets" => MemoryMessage::NoPets,
+            "pets" => MemoryMessage::Pets(
+                rest.split_whitespace()
+                    .map(|entry| {
+                        let mut it = entry.split(':');
+                        let pet = it.next()?.parse().ok()?;
+                        Some((pet, PetState { level: it.next()?.parse().ok()?, progress: it.next()?.parse().ok()? }))
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            ),
             "frame" => MemoryMessage::Frame,
             "self" => {
                 let (x, y, z, yaw) = (f32_next()?, f32_next()?, f32_next()?, f32_next()?);
@@ -85,6 +111,7 @@ impl MemoryMessage {
 pub enum MemoryCommand {
     Probe { actor: u64, entity: i32 },
     IdOffset(usize),
+    PetSearch,
 }
 
 impl MemoryCommand {
@@ -92,6 +119,7 @@ impl MemoryCommand {
         match self {
             MemoryCommand::Probe { actor, entity } => format!("probe {actor:x} {entity}"),
             MemoryCommand::IdOffset(offset) => format!("idoffset {offset}"),
+            MemoryCommand::PetSearch => "petsearch".into(),
         }
     }
 
@@ -100,6 +128,7 @@ impl MemoryCommand {
         match it.next()? {
             "probe" => Some(MemoryCommand::Probe { actor: u64::from_str_radix(it.next()?, 16).ok()?, entity: it.next()?.parse().ok()? }),
             "idoffset" => Some(MemoryCommand::IdOffset(it.next()?.parse().ok()?)),
+            "petsearch" => Some(MemoryCommand::PetSearch),
             _ => None,
         }
     }
@@ -119,14 +148,18 @@ mod tests {
             MemoryMessage::Npc(NpcActor { actor: 0x1f9abc010, entity: 33049, x: -64412.0, y: -78775.5, z: 26000.0 }),
             MemoryMessage::Frame,
             MemoryMessage::Found { actor: 0x1f9abc010, entity: 33049, offset: 0x26f0 },
+            MemoryMessage::Pets(vec![(1045, PetState { level: 0, progress: 3 }), (1063, PetState { level: 2, progress: 6 })]),
+            MemoryMessage::Pets(Vec::new()),
+            MemoryMessage::NoPets,
         ];
         for m in all {
             assert_eq!(MemoryMessage::parse(&m.to_line()), Some(m.clone()), "{}", m.to_line());
         }
-        for c in [MemoryCommand::Probe { actor: 0xf9408020, entity: 33984 }, MemoryCommand::IdOffset(9968)] {
+        for c in [MemoryCommand::Probe { actor: 0xf9408020, entity: 33984 }, MemoryCommand::IdOffset(9968), MemoryCommand::PetSearch] {
             assert_eq!(MemoryCommand::parse(&c.to_line()), Some(c));
         }
         assert_eq!(MemoryMessage::parse("self 1 2 nan 4 W"), None);
         assert_eq!(MemoryMessage::parse("bogus"), None);
+        assert_eq!(MemoryMessage::parse("pets 1045:0"), None);
     }
 }
