@@ -37,6 +37,24 @@ pub fn path_commands(values: &[f64], top: f64, width: f32, height: f32) -> Strin
     out
 }
 
+/// The line closest to a click at (`x`, `y`) (0..1 of the chart, `y` down), if one passes within `CLICK_REACH` of it.
+pub fn line_at<'a>(lines: impl IntoIterator<Item = (i32, &'a [f64])>, top: f64, x: f32, y: f32) -> Option<i32> {
+    const CLICK_REACH: f64 = 0.08;
+    let wanted = (1.0 - y as f64).clamp(0.0, 1.0) * top;
+    lines
+        .into_iter()
+        .filter(|(_, v)| !v.is_empty() && top > 0.0)
+        .map(|(id, v)| {
+            let at = x.clamp(0.0, 1.0) as f64 * (v.len() - 1) as f64;
+            let (i, f) = (at.floor() as usize, at.fract());
+            let value = v[i] + (v[(i + 1).min(v.len() - 1)] - v[i]) * f;
+            (id, ((value.min(top) - wanted) / top).abs())
+        })
+        .filter(|(_, d)| *d <= CLICK_REACH)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(id, _)| id)
+}
+
 /// A round number at or above `max` for the top of the axis: 1, 2 or 5 times a power of ten.
 pub fn nice_top(max: f64) -> f64 {
     if max <= 0.0 {
@@ -65,6 +83,15 @@ mod tests {
     fn paths_span_the_box() {
         assert_eq!(path_commands(&[0.0, 50.0, 100.0], 100.0, 200.0, 100.0), "M0.0 100.0 L100.0 50.0 L200.0 0.0 ");
         assert_eq!(path_commands(&[], 100.0, 200.0, 100.0), "");
+    }
+
+    #[test]
+    fn a_click_picks_the_nearest_line() {
+        let (low, high) = ([10.0, 10.0, 10.0], [80.0, 90.0, 100.0]);
+        let lines = || [(1, &low[..]), (2, &high[..])];
+        assert_eq!(line_at(lines(), 100.0, 0.5, 0.12), Some(2), "90 at the middle, near the top");
+        assert_eq!(line_at(lines(), 100.0, 0.0, 0.9), Some(1));
+        assert_eq!(line_at(lines(), 100.0, 0.5, 0.5), None, "no line near 50");
     }
 
     #[test]

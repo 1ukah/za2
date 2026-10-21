@@ -1,7 +1,8 @@
 """Exports the map tiles for za2: a JPEG colour image and a small PNG alpha mask per tile.
 
 Usage: python3 export_client_maps.py <dir with Verteron_tiles, Altgard_tiles, Abyss_tiles> <out dir> <calibration.json>
-Writes <out>/<map>/<col>_<row>.jpg and <col>_<row>_a.png (half size mask) and <out>/maps.json with everything za2 needs:
+Writes <out>/<map>/<col>_<row>.jpg, <col>_<row>_a.png (half size mask; only for tiles that are not wholly opaque) and
+<out>/maps.json with everything za2 needs:
 the tile size, the grid, the world -> native pixel calibration and the key of the map's spawn table in npcs/spawns.json.
 """
 import json
@@ -33,7 +34,12 @@ for key, m in MAPS.items():
         rgb = Image.new("RGB", im.size, (30, 40, 44))
         rgb.paste(im, mask=im.getchannel("A"))
         rgb.save(os.path.join(out, key, name + ".jpg"), "JPEG", quality=82, optimize=True)
-        im.getchannel("A").resize((tile // 2, tile // 2), Image.BILINEAR).save(os.path.join(out, key, name + "_a.png"), optimize=True)
+        alpha = im.getchannel("A")
+        mask_path = os.path.join(out, key, name + "_a.png")
+        if alpha.getextrema() != (255, 255):
+            alpha.resize((tile // 2, tile // 2), Image.BILINEAR).save(mask_path, optimize=True)
+        elif os.path.exists(mask_path):
+            os.remove(mask_path)
         count += 1
     # calibration -> native pixels of the whole map (tile * grid)
     c = cal[m["title"]]

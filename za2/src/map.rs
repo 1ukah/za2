@@ -11,7 +11,7 @@ pub const TILE_DECODE_SIZE: u32 = 1024;
 const TILE_MIN_SIZE: u32 = 128;
 const TILE_CACHE_BYTES: usize = 192 << 20;
 const TILE_THREADS: usize = 2;
-const MAX_MARKERS: usize = 4000;
+const MAX_MARKERS: usize = 20_000;
 const ANNOUNCE_RANGE: f32 = 12_000.0;
 /// Range of the Hidden Cube radar circle around the player (world units).
 pub const CUBE_RADAR_RANGE: f64 = 12_000.0;
@@ -40,7 +40,14 @@ fn decode_tile(color: &std::path::Path, mask: &std::path::Path, size: u32) -> Op
     let color = if color.width() > size { color.thumbnail(size, size) } else { color };
     let rgb = color.to_rgb8();
     let (w, h) = rgb.dimensions();
-    let alpha = image::open(mask).ok()?.to_luma8();
+    // a tile without a mask is opaque (whole tiles, as the game's map shows them)
+    let Some(alpha) = image::open(mask).ok().map(|m| m.to_luma8()) else {
+        let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(w, h);
+        for (out, p) in buffer.make_mut_slice().iter_mut().zip(rgb.pixels()) {
+            *out = Rgba8Pixel { r: p[0], g: p[1], b: p[2], a: 255 };
+        }
+        return Some(buffer);
+    };
     let (mw, mh) = alpha.dimensions();
     let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(w, h);
     let pixels = buffer.make_mut_slice();
@@ -73,7 +80,7 @@ impl TileLoader {
                 .spawn(move || loop {
                     let next = req_rx.lock().map(|rx| rx.recv());
                     let Ok(Ok((key, color, mask))) = next else { return };
-                    let decoded = if color.is_file() && mask.is_file() { decode_tile(&color, &mask, key.1) } else { None };
+                    let decoded = if color.is_file() { decode_tile(&color, &mask, key.1) } else { None };
                     if res_tx.send((key, decoded)).is_err() {
                         return;
                     }
@@ -149,6 +156,7 @@ impl TileLoader {
             .map(|(_, image)| image.clone())
     }
 
+    #[cfg(test)]
     pub fn loading(&self) -> bool {
         !self.pending.is_empty()
     }
@@ -338,34 +346,135 @@ pub struct StaticLayer {
     pub monsters: Vec<(i32, f32, f32)>,
     /// Colour of each selected monster: one per ticked pet (its monsters share it), one per monster ticked alone.
     pub monster_colors: HashMap<i32, (u8, u8, u8)>,
+    /// Where the selected monsters spawn, one outline per group of nearby spawn places.
+    pub areas: Vec<Area>,
 }
 
-/// The selected monsters of a map with their colour: the monsters of each ticked pet in the pet's colour, then each
-/// monster ticked on its own. Colours go round `PET_PALETTE` in that order, so the lists and the map agree.
-pub fn monster_colors(table: &str, pet_ids: &BTreeSet<i32>, monster_ids: &BTreeSet<i32>) -> Vec<(i32, (u8, u8, u8))> {
+/// A group of selected monsters that share a colour: the monsters of a ticked pet, or one monster ticked on its own.
+pub struct MonsterGroup {
+    pub label: String,
+    pub color: (u8, u8, u8),
+    pub npcs: Vec<i32>,
+}
+
+/// The selected monsters of a map in groups: the monsters of each ticked pet in the pet's colour, then each monster
+/// ticked on its own. Colours go round `PET_PALETTE` in that order, so the lists and the map agree.
+pub fn monster_groups(table: &str, pet_ids: &BTreeSet<i32>, monster_ids: &BTreeSet<i32>) -> Vec<MonsterGroup> {
     let on_map: HashSet<i32> = monsters::on_map(table).into_iter().collect();
-    let mut out: Vec<(i32, (u8, u8, u8))> = Vec::new();
-    let mut group = 0;
+    let mut taken: HashSet<i32> = HashSet::new();
+    let mut out: Vec<MonsterGroup> = Vec::new();
     for &pet in pet_ids {
-        let npcs: Vec<i32> = pets::npcs_of_pet(pet).iter().copied().filter(|n| on_map.contains(n)).collect();
+        let npcs: Vec<i32> = pets::npcs_of_pet(pet).iter().copied().filter(|n| on_map.contains(n) && taken.insert(*n)).collect();
         if npcs.is_empty() {
             continue;
         }
-        let color = PET_PALETTE[group % PET_PALETTE.len()];
-        group += 1;
-        for npc in npcs {
-            if !out.iter().any(|o| o.0 == npc) {
-                out.push((npc, color));
-            }
-        }
+        let label = pets::pet_name(pet, "en").map_or_else(|| format!("Pet #{pet}"), str::to_string);
+        out.push(MonsterGroup { label, color: PET_PALETTE[out.len() % PET_PALETTE.len()], npcs });
     }
     for &npc in monster_ids {
-        if on_map.contains(&npc) && !out.iter().any(|o| o.0 == npc) {
-            out.push((npc, PET_PALETTE[group % PET_PALETTE.len()]));
-            group += 1;
+        if on_map.contains(&npc) && taken.insert(npc) {
+            let label = za2_core::catalog::npcs::name_of(npc, "en").map_or_else(|| format!("#{npc}"), str::to_string);
+            out.push(MonsterGroup { label, color: PET_PALETTE[out.len() % PET_PALETTE.len()], npcs: vec![npc] });
         }
     }
     out
+}
+
+/// The selected monsters of a map with their colour (see `monster_groups`).
+pub fn monster_colors(table: &str, pet_ids: &BTreeSet<i32>, monster_ids: &BTreeSet<i32>) -> Vec<(i32, (u8, u8, u8))> {
+    monster_groups(table, pet_ids, monster_ids).into_iter().flat_map(|g| g.npcs.into_iter().map(move |n| (n, g.color))).collect()
+}
+
+/// Spawn places closer than this (50 m) belong to the same spawn area.
+const AREA_LINK: f32 = 5000.0;
+/// How far the border of a spawn area stays outside its spawn places (15 m).
+const AREA_MARGIN: f32 = 1500.0;
+
+/// Where a group of selected monsters spawns: the rounded outline around nearby spawn places (world units).
+pub struct Area {
+    pub label: String,
+    pub color: (u8, u8, u8),
+    pub outline: Vec<(f32, f32)>,
+    /// The bounding box of the outline: min x, min y, max x, max y.
+    pub bounds: (f32, f32, f32, f32),
+}
+
+/// Splits `points` into the groups of places linked by steps of at most `AREA_LINK`.
+fn spawn_clusters(points: &[(f32, f32)]) -> Vec<Vec<(f32, f32)>> {
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    let mut parent: Vec<usize> = (0..points.len()).collect();
+    for i in 0..points.len() {
+        for j in i + 1..points.len() {
+            let (dx, dy) = (points[i].0 - points[j].0, points[i].1 - points[j].1);
+            if dx.abs() <= AREA_LINK && dy.abs() <= AREA_LINK && dx * dx + dy * dy <= AREA_LINK * AREA_LINK {
+                let (a, b) = (root(&mut parent, i), root(&mut parent, j));
+                parent[a] = b;
+            }
+        }
+    }
+    let mut groups: HashMap<usize, Vec<(f32, f32)>> = HashMap::new();
+    for (i, &p) in points.iter().enumerate() {
+        let r = root(&mut parent, i);
+        groups.entry(r).or_default().push(p);
+    }
+    let mut out: Vec<Vec<(f32, f32)>> = groups.into_values().collect();
+    out.sort_by(|a, b| a[0].0.total_cmp(&b[0].0).then(a[0].1.total_cmp(&b[0].1)));
+    out
+}
+
+/// The convex hull of `points` (counter-clockwise, monotone chain).
+fn convex_hull(mut points: Vec<(f32, f32)>) -> Vec<(f32, f32)> {
+    points.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    points.dedup();
+    if points.len() < 3 {
+        return points;
+    }
+    let cross = |o: (f32, f32), a: (f32, f32), b: (f32, f32)| (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0);
+    let mut hull: Vec<(f32, f32)> = Vec::with_capacity(points.len() * 2);
+    for pass in 0..2 {
+        let start = hull.len();
+        let iter: Box<dyn Iterator<Item = &(f32, f32)>> = if pass == 0 { Box::new(points.iter()) } else { Box::new(points.iter().rev()) };
+        for &p in iter {
+            while hull.len() >= start + 2 && cross(hull[hull.len() - 2], hull[hull.len() - 1], p) <= 0.0 {
+                hull.pop();
+            }
+            hull.push(p);
+        }
+        hull.pop();
+    }
+    hull
+}
+
+/// The outline `AREA_MARGIN` around a group of places: the hull of a circle around each place.
+fn rounded_outline(points: &[(f32, f32)]) -> Vec<(f32, f32)> {
+    const STEPS: usize = 20;
+    let ring: Vec<(f32, f32)> = points
+        .iter()
+        .flat_map(|&(x, y)| {
+            (0..STEPS).map(move |k| {
+                let a = k as f32 * std::f32::consts::TAU / STEPS as f32;
+                (x + AREA_MARGIN * a.cos(), y + AREA_MARGIN * a.sin())
+            })
+        })
+        .collect();
+    convex_hull(ring)
+}
+
+pub fn spawn_areas(label: &str, color: (u8, u8, u8), points: &[(f32, f32)]) -> Vec<Area> {
+    spawn_clusters(points)
+        .into_iter()
+        .map(|cluster| {
+            let outline = rounded_outline(&cluster);
+            let bounds = outline.iter().fold((f32::MAX, f32::MAX, f32::MIN, f32::MIN), |b, &(x, y)| (b.0.min(x), b.1.min(y), b.2.max(x), b.3.max(y)));
+            Area { label: label.to_string(), color, outline, bounds }
+        })
+        .collect()
 }
 
 /// The icon of a monster: its portrait, else the portrait of its pet (none: drawn as the monster glyph).
@@ -405,6 +514,7 @@ impl StaticLayer {
         self.cube_places.clear();
         self.monsters.clear();
         self.monster_colors.clear();
+        self.areas.clear();
         let Some(map) = map else { return };
         for (i, group) in gather::cube_groups(&map.table).iter().enumerate() {
             let color = cube_group_color(i);
@@ -419,11 +529,237 @@ impl StaticLayer {
                 self.gather.push((item, x, y, gather_color(&item.kind)));
             }
         }
-        for (npc, color) in monster_colors(&map.table, pet_ids, monster_ids) {
-            self.monster_colors.insert(npc, color);
-            self.monsters.extend(monsters::spawns_of(&map.table, npc).iter().map(|&(x, y)| (npc, x, y)));
+        for group in monster_groups(&map.table, pet_ids, monster_ids) {
+            let mut places: Vec<(f32, f32)> = Vec::new();
+            for &npc in &group.npcs {
+                self.monster_colors.insert(npc, group.color);
+                let spawns = monsters::spawns_of(&map.table, npc);
+                self.monsters.extend(spawns.iter().map(|&(x, y)| (npc, x, y)));
+                places.extend(spawns.iter().copied());
+            }
+            self.areas.extend(spawn_areas(&group.label, group.color, &places));
         }
     }
+}
+
+/// A spawn area on the screen (logical pixels), with the place of its name: the middle under its bottom edge.
+pub struct ScreenArea {
+    pub outline: Vec<(f32, f32)>,
+    pub color: (u8, u8, u8),
+    pub label: String,
+    pub label_at: (f32, f32),
+}
+
+/// The spawn areas of `layer` that reach into the view, in screen coordinates.
+pub fn screen_areas(map: &MapInfo, view: &View, layer: &StaticLayer) -> Vec<ScreenArea> {
+    let (hx, hy) = view.world_half_extent();
+    layer
+        .areas
+        .iter()
+        .filter(|a| {
+            let (x0, y0, x1, y1) = a.bounds;
+            x1 as f64 >= view.center_x - hx && x0 as f64 <= view.center_x + hx && y1 as f64 >= view.center_y - hy && y0 as f64 <= view.center_y + hy
+        })
+        .map(|a| {
+            let outline: Vec<(f32, f32)> = a
+                .outline
+                .iter()
+                .map(|&(x, y)| {
+                    let (sx, sy) = view.to_screen(map, x as f64, y as f64);
+                    (sx as f32, sy as f32)
+                })
+                .collect();
+            let (min_x, max_x, max_y) = outline.iter().fold((f32::MAX, f32::MIN, f32::MIN), |b, &(x, y)| (b.0.min(x), b.1.max(x), b.2.max(y)));
+            ScreenArea { label: a.label.clone(), color: a.color, label_at: ((min_x + max_x) / 2.0, max_y), outline }
+        })
+        .collect()
+}
+
+/// Draws the markers and spawn areas of a view into one image. Hundreds of markers as UI elements (each a clipped icon in
+/// a ring, a glyph made of paths) made the map slow; one image is cheap to show, and each kind of marker is drawn once
+/// and then copied.
+#[derive(Default)]
+pub struct LayerPainter {
+    sprites: HashMap<SpriteKey, tiny_skia::Pixmap>,
+    icons: HashMap<&'static str, Option<tiny_skia::Pixmap>>,
+    canvas: Option<tiny_skia::Pixmap>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct SpriteKey {
+    icon: Option<&'static str>,
+    glyph: bool,
+    color: (u8, u8, u8),
+    live: bool,
+    level: i32,
+    /// diameter in physical pixels, times 4
+    size: u32,
+}
+
+/// Room around a sprite for the level arrow, in diameters.
+const SPRITE_PAD: f32 = 0.4;
+
+fn paint_color((r, g, b): (u8, u8, u8), alpha: f32) -> tiny_skia::Paint<'static> {
+    let mut paint = tiny_skia::Paint::default();
+    paint.set_color_rgba8(r, g, b, (alpha.clamp(0.0, 1.0) * 255.0).round() as u8);
+    paint.anti_alias = true;
+    paint
+}
+
+fn circle(cx: f32, cy: f32, r: f32) -> Option<tiny_skia::Path> {
+    tiny_skia::PathBuilder::from_circle(cx, cy, r.max(0.1))
+}
+
+/// The monster glyph (a skull) in a 24 x 24 box.
+fn skull_path() -> Option<tiny_skia::Path> {
+    let mut pb = tiny_skia::PathBuilder::new();
+    pb.push_circle(12.0, 10.5, 7.5);
+    pb.move_to(8.5, 16.5);
+    pb.line_to(8.5, 21.0);
+    pb.line_to(15.5, 21.0);
+    pb.line_to(15.5, 16.5);
+    pb.move_to(12.0, 18.0);
+    pb.line_to(12.0, 21.0);
+    pb.finish()
+}
+
+fn load_icon(relative: &str) -> Option<tiny_skia::Pixmap> {
+    let rgba = image::open(za2_core::assets::path(relative)).ok()?.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let mut data = rgba.into_raw();
+    for px in data.chunks_exact_mut(4) {
+        let a = px[3] as u16;
+        for c in &mut px[..3] {
+            *c = ((*c as u16 * a + 127) / 255) as u8;
+        }
+    }
+    tiny_skia::Pixmap::from_vec(data, tiny_skia::IntSize::from_wh(w, h)?)
+}
+
+impl LayerPainter {
+    fn sprite(&mut self, key: SpriteKey) -> Option<&tiny_skia::Pixmap> {
+        if !self.sprites.contains_key(&key) {
+            if self.sprites.len() > 2048 {
+                self.sprites.clear();
+            }
+            let icon = key.icon.and_then(|i| self.icons.entry(i).or_insert_with(|| load_icon(i)).clone());
+            let sprite = draw_sprite(key, icon.as_ref())?;
+            self.sprites.insert(key, sprite);
+        }
+        self.sprites.get(&key)
+    }
+
+    /// The markers and areas of a `width` x `height` view (logical pixels) at `scale` physical pixels per logical one.
+    pub fn paint(&mut self, width: f64, height: f64, scale: f32, markers: &[Marker], areas: &[ScreenArea]) -> Image {
+        let (w, h) = (((width as f32 * scale).ceil() as u32).max(1), ((height as f32 * scale).ceil() as u32).max(1));
+        let mut canvas = match self.canvas.take() {
+            Some(mut c) if c.width() == w && c.height() == h => {
+                c.fill(tiny_skia::Color::TRANSPARENT);
+                c
+            }
+            _ => match tiny_skia::Pixmap::new(w, h) {
+                Some(c) => c,
+                None => return Image::default(),
+            },
+        };
+        let to_physical = tiny_skia::Transform::from_scale(scale, scale);
+        for area in areas {
+            let mut pb = tiny_skia::PathBuilder::new();
+            for (i, &(x, y)) in area.outline.iter().enumerate() {
+                if i == 0 {
+                    pb.move_to(x, y);
+                } else {
+                    pb.line_to(x, y);
+                }
+            }
+            pb.close();
+            if let Some(path) = pb.finish() {
+                canvas.fill_path(&path, &paint_color(area.color, 0.14), tiny_skia::FillRule::Winding, to_physical, None);
+                let stroke = tiny_skia::Stroke { width: 2.0, line_join: tiny_skia::LineJoin::Round, ..Default::default() };
+                canvas.stroke_path(&path, &paint_color(area.color, 0.9), &stroke, to_physical, None);
+            }
+        }
+        for m in markers {
+            let d = m.size * scale;
+            let key = SpriteKey { icon: m.icon, glyph: m.glyph, color: m.color, live: m.live, level: m.level, size: (d * 4.0).round() as u32 };
+            let Some(sprite) = self.sprite(key) else { continue };
+            let pad = (sprite.width() as f32 - d) / 2.0;
+            let (x, y) = ((m.x * scale - d / 2.0 - pad).round() as i32, (m.y * scale - d / 2.0 - pad).round() as i32);
+            canvas.draw_pixmap(x, y, sprite.as_ref(), &tiny_skia::PixmapPaint::default(), tiny_skia::Transform::identity(), None);
+        }
+        let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(canvas.data(), w, h);
+        self.canvas = Some(canvas);
+        Image::from_rgba8_premultiplied(buffer)
+    }
+}
+
+/// One marker as `MapView` drew it: a dot, or the icon (or the monster glyph) in a ring of the marker colour, with an arrow
+/// when it is above or below the player.
+fn draw_sprite(key: SpriteKey, icon: Option<&tiny_skia::Pixmap>) -> Option<tiny_skia::Pixmap> {
+    let d = key.size as f32 / 4.0;
+    let pad = (d * SPRITE_PAD).ceil().max(7.0);
+    let side = (d + 2.0 * pad).ceil() as u32;
+    let mut pm = tiny_skia::Pixmap::new(side, side)?;
+    let (c, r) = (pad + d / 2.0, d / 2.0);
+    let fill = tiny_skia::FillRule::Winding;
+    let id = tiny_skia::Transform::identity();
+    let opacity = if key.live { 1.0 } else { 0.8 };
+    let ringed = icon.is_some() || key.glyph;
+    if ringed {
+        let ring = (d * 0.09).max(2.0);
+        pm.fill_path(&circle(c, c, r)?, &paint_color((0, 0, 0), 0xa0 as f32 / 255.0), fill, id, None);
+        if let Some(icon) = icon {
+            let inner = r - ring;
+            let k = (2.0 * inner) / icon.width().max(icon.height()) as f32;
+            let (ox, oy) = (c - icon.width() as f32 * k / 2.0, c - icon.height() as f32 * k / 2.0);
+            let shader = tiny_skia::Pattern::new(
+                icon.as_ref(),
+                tiny_skia::SpreadMode::Pad,
+                tiny_skia::FilterQuality::Bicubic,
+                opacity,
+                tiny_skia::Transform::from_scale(k, k).post_translate(ox, oy),
+            );
+            let paint = tiny_skia::Paint { shader, anti_alias: true, ..Default::default() };
+            pm.fill_path(&circle(c, c, inner)?, &paint, fill, id, None);
+        } else {
+            let box_side = d * 0.6;
+            let k = box_side / 24.0;
+            let stroke = tiny_skia::Stroke { width: (d * 0.07).max(1.2) / k, line_cap: tiny_skia::LineCap::Round, line_join: tiny_skia::LineJoin::Round, ..Default::default() };
+            let at = tiny_skia::Transform::from_scale(k, k).post_translate(c - box_side / 2.0, c - box_side / 2.0);
+            let skull = skull_path()?;
+            pm.stroke_path(&skull, &paint_color(key.color, opacity), &stroke, at, None);
+            for ex in [9.0, 15.0] {
+                pm.fill_path(&circle(ex, 11.0, 1.4)?, &paint_color(key.color, opacity), fill, at, None);
+            }
+        }
+        let stroke = tiny_skia::Stroke { width: ring, ..Default::default() };
+        pm.stroke_path(&circle(c, c, r - ring / 2.0)?, &paint_color(key.color, if key.live { 1.0 } else { 0.6 }), &stroke, id, None);
+    } else {
+        pm.fill_path(&circle(c, c, r)?, &paint_color(key.color, 1.0), fill, id, None);
+        let (border, color, alpha) = if key.live { (2.0, (255, 255, 255), 1.0) } else { (1.0, (0, 0, 0), 0x99 as f32 / 255.0) };
+        let stroke = tiny_skia::Stroke { width: border, ..Default::default() };
+        pm.stroke_path(&circle(c, c, r - border / 2.0)?, &paint_color(color, alpha), &stroke, id, None);
+    }
+    if key.level != 0 {
+        // a triangle at the top right, pointing up (above the player) or down (below)
+        let k = (d / 22.0).max(1.0);
+        let (x0, y0) = (pad + d - 3.0 * k, pad - 6.0 * k);
+        let mut pb = tiny_skia::PathBuilder::new();
+        if key.level > 0 {
+            pb.move_to(x0 + 4.5 * k, y0);
+            pb.line_to(x0 + 9.0 * k, y0 + 8.0 * k);
+            pb.line_to(x0, y0 + 8.0 * k);
+        } else {
+            pb.move_to(x0, y0);
+            pb.line_to(x0 + 9.0 * k, y0);
+            pb.line_to(x0 + 4.5 * k, y0 + 8.0 * k);
+        }
+        pb.close();
+        let arrow = pb.finish()?;
+        pm.fill_path(&arrow, &paint_color((255, 255, 255), 1.0), fill, id, None);
+        pm.stroke_path(&arrow, &paint_color((0, 0, 0), 1.0), &tiny_skia::Stroke { width: 1.0, ..Default::default() }, id, None);
+    }
+    Some(pm)
 }
 
 pub struct LiveInputs<'a> {
@@ -584,6 +920,40 @@ mod tests {
     }
 
     #[test]
+    fn spawn_areas_split_far_groups_and_hold_every_place() {
+        let places = [(0.0, 0.0), (3000.0, 0.0), (3000.0, 2500.0), (100_000.0, 0.0)];
+        let areas = spawn_areas("Wolf", (255, 0, 0), &places);
+        assert_eq!(areas.len(), 2, "places 50 m apart share an area, 1 km away is another");
+        for &(x, y) in &places {
+            let area = areas.iter().find(|a| x >= a.bounds.0 && x <= a.bounds.2).unwrap();
+            assert!(x - area.bounds.0 >= AREA_MARGIN * 0.95 && area.bounds.2 - x >= AREA_MARGIN * 0.95);
+            assert!(y - area.bounds.1 >= AREA_MARGIN * 0.95 && area.bounds.3 - y >= AREA_MARGIN * 0.95);
+        }
+        assert!(areas.iter().all(|a| a.outline.len() >= 8 && a.label == "Wolf"));
+    }
+
+    #[test]
+    fn the_layer_shows_markers_and_areas() {
+        let mut painter = LayerPainter::default();
+        let markers = [
+            Marker { x: 20.0, y: 20.0, color: (255, 0, 0), size: 20.0, live: true, level: 1, icon: None, glyph: true },
+            Marker { x: 60.0, y: 20.0, color: (0, 255, 0), size: 10.0, live: false, level: 0, icon: None, glyph: false },
+        ];
+        let areas = [ScreenArea { outline: vec![(10.0, 50.0), (90.0, 50.0), (50.0, 90.0)], color: (0, 0, 255), label: "x".into(), label_at: (50.0, 90.0) }];
+        let image = painter.paint(100.0, 100.0, 2.0, &markers, &areas);
+        assert_eq!((image.size().width, image.size().height), (200, 200));
+        let pixels = image.to_rgba8_premultiplied().unwrap();
+        let alpha = |x: usize, y: usize| pixels.as_slice()[y * 200 + x].a;
+        assert!(alpha(120, 40) > 200, "the green dot");
+        assert!(alpha(100, 140) > 0, "inside the area");
+        assert_eq!(alpha(190, 190), 0, "nothing outside");
+        // the same markers again come from the sprite cache
+        let sprites = painter.sprites.len();
+        painter.paint(100.0, 100.0, 2.0, &markers, &areas);
+        assert_eq!(painter.sprites.len(), sprites);
+    }
+
+    #[test]
     fn decode_size_follows_zoom() {
         assert_eq!(decode_size_for(75.0), TILE_MIN_SIZE);
         assert_eq!(decode_size_for(300.0), 512);
@@ -608,7 +978,7 @@ mod tests {
             loader.poll();
         }
         assert!(!loader.loading());
-        let on_disk = std::fs::read_dir(map.tile_folder()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with("_a.png")).count();
+        let on_disk = std::fs::read_dir(map.tile_folder()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".jpg")).count();
         assert_eq!(shown, on_disk);
         visible_tiles(map, &view, &mut loader);
         assert!(!loader.loading(), "a settled view must not request tiles again");

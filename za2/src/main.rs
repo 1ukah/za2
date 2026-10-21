@@ -32,9 +32,10 @@ use worker::{CaptureState, Shared, Snapshot, Source, WorkerCommand};
 
 slint::include_modules!();
 
-/// `--tab settings` opens the settings dialog over the meter; the pets page is the fourth page.
+/// `--tab settings` opens the settings dialog over the meter; the pets page is the fourth page, the profile the fifth.
 const SETTINGS_TAB: i32 = -1;
 const PETS_TAB: i32 = 3;
+const PROFILE_TAB: i32 = 4;
 
 struct Args {
     replay: Option<PathBuf>,
@@ -48,14 +49,15 @@ struct Args {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: za2 [--replay recording.jsonl [--speed N]] [--x11] [--tab meter|map|timeline|pets|settings] [--helper PATH] [--memory-helper PATH | --no-memory] [--assets DIR]");
+    eprintln!("usage: za2 [--replay recording.jsonl [--speed N]] [--x11] [--tab meter|map|timeline|pets|profile|settings] [--helper PATH] [--memory-helper PATH | --no-memory] [--assets DIR]");
     eprintln!("       za2 --version");
     eprintln!("       za2 --send show|reset|toggle-overlay|toggle-map-overlay|toggle-pet-overlay|toggle-lock|map-zoom-in|map-zoom-out");
     std::process::exit(2);
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { replay: None, speed: 1.0, x11: false, helper: None, memory_helper: None, no_memory: false, send: None, tab: 0 };
+    // the map is the page za2 opens on
+    let mut a = Args { replay: None, speed: 1.0, x11: false, helper: None, memory_helper: None, no_memory: false, send: None, tab: 1 };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -73,6 +75,7 @@ fn parse_args() -> Args {
                     Some("timeline") => 2,
                     Some("settings") => SETTINGS_TAB,
                     Some("pets") => PETS_TAB,
+                    Some("profile") => PROFILE_TAB,
                     _ => usage(),
                 }
             }
@@ -520,6 +523,8 @@ struct Ui {
     sessions_shown: usize,
     sessions_count: usize,
     loader: TileLoader,
+    /// Draws the markers and spawn areas of the map and the map overlay.
+    painter: map::LayerPainter,
     map: MapState,
     commands: SyncSender<WorkerCommand>,
     shared: Arc<Shared>,
@@ -530,6 +535,10 @@ struct Ui {
     /// What the effect lanes were built from (the effects and the window length), so an unchanged list is not re-created
     /// on every refresh.
     lanes_from: RefCell<Option<(Vec<za2_core::buffs::BuffUptime>, u64)>>,
+    /// What the Profile tab shows, so an unchanged profile is not re-created on every refresh.
+    profile_shown: Option<Vec<(String, Vec<(String, String, bool)>)>>,
+    /// The DPS curves the chart shows and its top value, to find the line under a click.
+    chart_curves: RefCell<(Vec<(i32, Vec<f64>)>, f64)>,
 }
 
 #[derive(Default)]
@@ -539,6 +548,7 @@ struct Filters {
     /// The search of the map overlay.
     overlay_query: String,
     pet_query: String,
+    boss_query: String,
     expanded: std::collections::BTreeSet<String>,
     /// Pets of the monster list that show their monsters.
     expanded_pets: std::collections::BTreeSet<i32>,
@@ -563,12 +573,16 @@ fn to_tiles(quads: Vec<map::TileQuad>) -> ModelRc<MapTile> {
     ModelRc::new(VecModel::from(tiles))
 }
 
-fn to_markers(markers: &[Marker]) -> ModelRc<MapMarker> {
-    let list: Vec<MapMarker> =
-        markers
-            .iter()
-            .map(|m| MapMarker { x: m.x, y: m.y, size: m.size, color: rgb(m.color), icon: m.icon.map(icons::load).unwrap_or_default(), glyph: m.glyph, live: m.live, level: m.level })
-            .collect();
+/// The names of the spawn areas that are big enough on the screen to carry one.
+fn to_labels(areas: &[map::ScreenArea]) -> ModelRc<MapLabel> {
+    let list: Vec<MapLabel> = areas
+        .iter()
+        .filter(|a| {
+            let (x0, x1) = a.outline.iter().fold((f32::MAX, f32::MIN), |b, p| (b.0.min(p.0), b.1.max(p.0)));
+            x1 - x0 >= 24.0
+        })
+        .map(|a| MapLabel { x: a.label_at.0, y: a.label_at.1, text: a.label.clone().into(), color: rgb(a.color) })
+        .collect();
     ModelRc::new(VecModel::from(list))
 }
 
@@ -723,7 +737,6 @@ fn apply_meter(app: &App, ui: &Ui) {
         None => "Select a player to see the skills".into(),
     };
     app.set_skills_title(title.into());
-    app.set_odyle_text(s.odyle.map(|(basic, charged)| if charged > 0 { format!("{basic} (+{charged})") } else { basic.to_string() }).unwrap_or_default().into());
     if app.get_tab() == 2 {
         apply_timeline(app, ui);
     }
@@ -773,6 +786,7 @@ fn apply_timeline(app: &App, ui: &Ui) {
         })
         .collect();
     sync_model(&ui.models.chart_lines, lines);
+    *ui.chart_curves.borrow_mut() = (curves.iter().map(|(r, dps)| (r.id, dps.clone())).collect(), top);
     let name_of = |id: i32| shown.iter().find(|r| r.id == id).map_or_else(|| format!("#{id}"), |r| r.name.to_string());
     let deaths: Vec<(f64, i32)> = match history {
         Some(h) => h.rows.iter().flat_map(|r| r.deaths.iter().map(move |&t| (t, r.id))).collect(),
@@ -793,7 +807,11 @@ fn apply_timeline(app: &App, ui: &Ui) {
     let on_target = app.get_buff_mode() == 1;
     let (title, uptimes): (String, Option<&Vec<za2_core::buffs::BuffUptime>>) = match (history, on_target) {
         (Some(h), false) => (format!("Effects on {}", name_of(selected)), h.rows.iter().find(|r| r.id == selected).map(|r| &r.buffs)),
-        (Some(_), true) => ("Effects on the target are not kept for past sessions".into(), None),
+        (Some(h), true) => match h.rows.iter().find(|r| r.id == selected).filter(|r| r.target.is_some()) {
+            Some(r) => (format!("Effects on {}, {}'s main target", r.target.as_deref().unwrap_or_default(), name_of(selected)), Some(&r.target_buffs)),
+            // sessions saved before za2 kept the target's effects
+            None => ("Effects on the target were not saved for this session".into(), None),
+        },
         (None, false) => (format!("Effects on {}", name_of(selected)), live.buffs.get(&selected)),
         (None, true) => match live.target_buffs.get(&selected) {
             Some((target, list)) => (format!("Effects on {target}, {}'s main target", name_of(selected)), Some(list)),
@@ -833,7 +851,7 @@ fn apply_timeline(app: &App, ui: &Ui) {
     }
     app.set_buff_title(if selected >= 0 { title } else { "Effects".into() }.into());
     app.set_buff_empty(
-        if selected < 0 { "Select a player in the legend above or on the Meter tab to see the effects on them" } else { "No timed effects" }.into(),
+        if selected < 0 { "" } else { "No timed effects" }.into(),
     );
 }
 
@@ -845,9 +863,11 @@ fn apply_bosses(app: &App, ui: &Ui) {
     let bosses: Vec<&za2_core::catalog::field_bosses::FieldBoss> =
         za2_core::catalog::field_bosses::all().iter().filter(|b| map.table.ends_with(&format!("/{}", b.map_key))).collect();
     let ago = |ms: i64| duration_text_long(((now_ms - ms) / 1000) as f64);
+    let query = ui.filters.boss_query.trim();
     let mut rows: Vec<(i64, BossRow)> = bosses
         .iter()
         .enumerate()
+        .filter(|(_, b)| matches_query(&b.name, query))
         .map(|(index, b)| {
             use za2_core::field_bosses::BossState;
             let seen = board.bosses.get(&b.world_id).map(|s| s.seen_ms);
@@ -863,15 +883,95 @@ fn apply_bosses(app: &App, ui: &Ui) {
         })
         .collect();
     rows.sort_by_key(|r| r.0);
+    let summary = match (bosses.is_empty(), rows.is_empty()) {
+        (true, _) => "No field bosses on this map.",
+        (false, true) => "No field boss matches.",
+        (false, false) => "",
+    };
     sync_model(&ui.models.boss_rows, rows.into_iter().map(|r| r.1).collect());
-    app.set_boss_summary(
-        if bosses.is_empty() {
-            "No field bosses on this map.".to_string()
-        } else {
-            "The game tells the field bosses of your faction's map when you open the map (M) in the game.".to_string()
-        }
-        .into(),
-    );
+    app.set_boss_summary(summary.into());
+}
+
+/// The Profile tab: what is known of the own character, its pets and the connection.
+fn apply_profile(app: &App, ui: &mut Ui) {
+    let s = &ui.snapshot;
+    let unknown = "—".to_string();
+    let or_unknown = |v: Option<String>| v.unwrap_or_else(|| unknown.clone());
+    let own = s.own.as_ref();
+    let mut sections: Vec<(String, Vec<(String, String, bool)>)> = Vec::new();
+    let line = |label: &str, value: String| (label.to_string(), value, false);
+
+    let logged_in = own.and_then(|o| o.logged_in_at).filter(|&at| at > 0 && s.now >= at).map(|at| format!("{} ago", duration_text_long(((s.now - at) / 1_000_000) as f64)));
+    sections.push((
+        "CHARACTER".into(),
+        vec![
+            line("Name", or_unknown(own.map(|o| o.name.clone()).or_else(|| s.learned_name.clone()))),
+            line("Class", or_unknown(own.and_then(|o| o.class).map(str::to_string))),
+            line("Level", or_unknown(own.and_then(|o| o.level).map(|l| l.to_string()))),
+            line("Faction", or_unknown(s.faction.map(str::to_string))),
+            line("Server", or_unknown(own.and_then(|o| o.server_id).map(|id| id.to_string()))),
+            line("Legion", or_unknown(own.and_then(|o| o.guild.clone()))),
+            line("Combat power", own.and_then(|o| o.combat_power).map_or_else(|| "— (known while in a party)".to_string(), thousands)),
+            line("Gear score", own.and_then(|o| o.gear_score).map_or_else(|| "— (known while in a party)".to_string(), |g| thousands(g as u64))),
+            line("Logged in", or_unknown(logged_in)),
+        ],
+    ));
+    let (basic, charged) = s.odyle.map_or((unknown.clone(), unknown.clone()), |(b, c)| (thousands(b as u64), thousands(c as u64)));
+    sections.push(("ODYLE ENERGY".into(), vec![("Odyle energy".into(), basic, true), ("Charged".into(), charged, true)]));
+
+    let (source, _, _) = pet_source_text(s.pet_source);
+    let all = pets::all().len();
+    let unlocked = s.pets.unlocked();
+    let maxed = s.pets.maxed();
+    let levels: u32 = pets::all().into_iter().map(|p| s.pets.get(p).level as u32).sum();
+    sections.push((
+        "PETS".into(),
+        vec![
+            line("Unlocked", format!("{unlocked} of {all}")),
+            line("At max level", format!("{maxed} of {all}")),
+            line("Still to level", (unlocked - maxed.min(unlocked)).to_string()),
+            line("Locked", (all - unlocked.min(all)).to_string()),
+            line("Levels in total", levels.to_string()),
+            line("Pinned to the overlay", ui.settings.pinned_pets.len().to_string()),
+            line("Source", source.to_string()),
+        ],
+    ));
+
+    let position = s.position.as_ref();
+    let (ping, _) = ping_text(s);
+    sections.push((
+        "WORLD AND CONNECTION".into(),
+        vec![
+            line("Zone", if s.zone_name.is_empty() { unknown.clone() } else { s.zone_name.clone() }),
+            line("Map", or_unknown(position.and_then(|p| p.map).map(|m| m.title.clone()))),
+            line(
+                "Position",
+                position
+                    .filter(|p| p.state != PositionState::Unknown)
+                    .map_or_else(|| state_text(PositionState::Unknown).to_string(), |p| format!("{:.0}, {:.0}  ·  {}", p.x / 100.0, p.y / 100.0, state_text(p.state))),
+            ),
+            line("Ping", if ping.is_empty() { unknown.clone() } else { ping }),
+            line("Connection", s.status.clone()),
+            line("Memory reader", if s.memory_status.is_empty() { unknown.clone() } else { s.memory_status.clone() }),
+            line("Saved boss fights", s.sessions.len().to_string()),
+        ],
+    ));
+
+    if ui.profile_shown.as_ref() == Some(&sections) {
+        return;
+    }
+    let model: Vec<ProfileSection> = sections
+        .iter()
+        .map(|(title, items)| ProfileSection {
+            title: title.clone().into(),
+            items: ModelRc::new(VecModel::from(
+                items.iter().map(|(label, value, accent)| ProfileItem { label: label.clone().into(), value: value.clone().into(), accent: *accent }).collect::<Vec<_>>(),
+            )),
+        })
+        .collect();
+    app.set_profile(ModelRc::new(VecModel::from(model)));
+    app.set_profile_empty(SharedString::new());
+    ui.profile_shown = Some(sections);
 }
 
 /// "1:23:45" for an hour or more, else "23:45".
@@ -963,18 +1063,21 @@ fn apply_pets(app: &App, ui: &Ui) {
     let s = &ui.snapshot;
     let query = ui.filters.pet_query.trim();
     let filter = app.get_pet_filter();
-    let mut rows: Vec<PetRow> = pets::all()
+    let species = pet_species();
+    let wanted_species = usize::try_from(app.get_pet_species() - 1).ok().and_then(|i| species.get(i));
+    let mut rows: Vec<(PetState, PetRow)> = pets::all()
         .into_iter()
+        .filter(|&p| wanted_species.is_none_or(|w| pets::species_of(p) == Some(w.as_str())))
         .filter(|&p| matches_query(&pet_label(p), query) || pets::species_of(p).is_some_and(|sp| matches_query(sp, query)))
-        .map(|p| pet_row(p, s.pets.get(p), ui.settings.pinned_pets.contains(&p), s.target_pets.contains(&p)))
-        .filter(|r| match filter {
+        .map(|p| (s.pets.get(p), pet_row(p, s.pets.get(p), ui.settings.pinned_pets.contains(&p), s.target_pets.contains(&p))))
+        .filter(|(_, r)| match filter {
             1 => r.pinned,
             2 => !r.max,
             _ => true,
         })
         .collect();
-    rows.sort_by_key(|r| r.name.to_lowercase());
-    sync_model(&ui.models.pet_rows, rows);
+    sort_pets(&mut rows, app.get_pet_sort(), app.get_pet_sort_desc());
+    sync_model(&ui.models.pet_rows, rows.into_iter().map(|r| r.1).collect());
     let (source, _, color) = pet_source_text(s.pet_source);
     app.set_pet_source(source.into());
     app.set_pet_source_color(color);
@@ -986,6 +1089,31 @@ fn apply_pets(app: &App, ui: &Ui) {
         ui.settings.pinned_pets.len()
     );
     app.set_pet_summary(summary.into());
+}
+
+/// The pet types of the pet window (Cognia, Fera, ...), by name.
+fn pet_species() -> Vec<String> {
+    let mut list: Vec<String> = pets::all().into_iter().filter_map(pets::species_of).map(str::to_string).collect();
+    list.sort();
+    list.dedup();
+    list
+}
+
+/// Orders the Pets tab by a column (0 name, 1 level, 2 progress to the next level, 3 kills left), the pinned pets first so
+/// they are quick to unpin. Equal values go by name.
+fn sort_pets(rows: &mut [(PetState, PetRow)], column: i32, descending: bool) {
+    rows.sort_by(|(a, ra), (b, rb)| {
+        let by_column = match column {
+            1 => (a.level, a.progress).cmp(&(b.level, b.progress)),
+            2 => ra.share.total_cmp(&rb.share),
+            // a pet at max has nothing left: after all the others
+            3 => (a.is_max(), a.left()).cmp(&(b.is_max(), b.left())),
+            _ => std::cmp::Ordering::Equal,
+        };
+        let by_name = ra.name.to_lowercase().cmp(&rb.name.to_lowercase());
+        let order = if column == 0 { by_name } else { by_column.then(by_name) };
+        rb.pinned.cmp(&ra.pinned).then(if descending { order.reverse() } else { order })
+    });
 }
 
 /// The pet overlay: the pet of the monster the player fights first (when it is not pinned), then the pinned pets by name.
@@ -1078,6 +1206,38 @@ fn toggle_monster(settings: &mut Settings, npc: i32, on: bool) {
     }
 }
 
+/// With auto-pin on, pins the pets of the ticked pets and monsters to the pet overlay, and unpins the ones it pinned once
+/// nothing of them is ticked any more. Pins made by hand stay.
+fn sync_auto_pins(settings: &mut Settings) {
+    if !settings.pet_auto_pin {
+        return;
+    }
+    let wanted: std::collections::BTreeSet<i32> =
+        settings.pets.iter().copied().chain(settings.monsters.iter().flat_map(|&n| pets::pets_of_npc(n).iter().copied())).collect();
+    for &pet in &wanted {
+        if settings.pinned_pets.insert(pet) {
+            settings.auto_pinned.insert(pet);
+        }
+    }
+    let gone: Vec<i32> = settings.auto_pinned.iter().copied().filter(|p| !wanted.contains(p)).collect();
+    for pet in gone {
+        settings.auto_pinned.remove(&pet);
+        settings.pinned_pets.remove(&pet);
+    }
+}
+
+/// After the ticked pets or monsters changed: the pins, the lists and the maps.
+fn monsters_changed(app: &App, u: &mut Ui) {
+    sync_auto_pins(&mut u.settings);
+    u.settings.save();
+    apply_filters(app, u);
+    apply_map(app, u, true);
+    apply_pets(app, u);
+    if u.settings.pet_overlay {
+        apply_pet_overlay(u);
+    }
+}
+
 fn monster_spawn_count(map: &MapInfo, npc: i32) -> usize {
     za2_core::catalog::monsters::spawns_of(&map.table, npc).len()
 }
@@ -1087,11 +1247,16 @@ fn player_map(ui: &Ui) -> &'static MapInfo {
     ui.snapshot.position.as_ref().and_then(|p| p.map).unwrap_or_else(|| displayed_map(ui))
 }
 
-/// Puts the ticked rows first when nothing is searched (so they are quick to untick); a search keeps its own order.
-fn ticked_first(rows: &mut [FilterRow], searching: bool) {
-    if !searching {
-        rows.sort_by_key(|r| !r.checked);
-    }
+/// Puts the ticked rows first (so they are quick to untick), keeping the order within the ticked and the others.
+fn ticked_first(rows: &mut [FilterRow]) {
+    rows.sort_by_key(|r| !(r.checked || r.partial));
+}
+
+/// The same for lists of groups (a header with the rows under it): the groups with something ticked first.
+fn ticked_groups_first(groups: Vec<Vec<FilterRow>>) -> Vec<FilterRow> {
+    let mut groups = groups;
+    groups.sort_by_key(|g| !g.first().is_some_and(|r| r.checked || r.partial));
+    groups.into_iter().flatten().collect()
 }
 
 /// The map overlay's search: resources and monsters of the player's map; with no search, the ticked ones first.
@@ -1134,7 +1299,7 @@ fn apply_overlay_search(overlay: &MapOverlay, ui: &Ui) {
             rows.push(FilterRow { key: format!("m:{npc}").into(), label: monster_name(npc).into(), detail: detail.into(), checked: on, color: rgb(color), icon, glyph, ..Default::default() });
         }
     }
-    ticked_first(&mut rows, !query.is_empty());
+    ticked_first(&mut rows);
     rows.truncate(300);
     overlay.set_search_rows(ModelRc::new(VecModel::from(rows)));
 }
@@ -1143,7 +1308,7 @@ fn apply_filters(app: &App, ui: &Ui) {
     let map = displayed_map(ui);
     let query = ui.filters.resource_query.trim();
     let selected = &ui.settings.gather_items;
-    let mut rows: Vec<FilterRow> = Vec::new();
+    let mut blocks: Vec<Vec<FilterRow>> = Vec::new();
     let mut chosen = 0;
     for kind in gather::KINDS {
         let all = resource_items(kind, map, "");
@@ -1159,6 +1324,7 @@ fn apply_filters(app: &App, ui: &Ui) {
         let picked = shown.iter().filter(|i| selected.contains(&i.key)).count();
         let expanded = !query.is_empty() || ui.filters.expanded.contains(kind);
         let icon = map_icons::gather(kind).map(icons::load).unwrap_or_default();
+        let mut rows: Vec<FilterRow> = Vec::new();
         rows.push(FilterRow {
             key: (*kind).into(),
             label: map::kind_label(kind).into(),
@@ -1174,9 +1340,7 @@ fn apply_filters(app: &App, ui: &Ui) {
         });
         if expanded {
             let mut shown = shown;
-            if query.is_empty() {
-                shown.sort_by_key(|i| !selected.contains(&i.key));
-            }
+            shown.sort_by_key(|i| !selected.contains(&i.key));
             for item in shown {
                 let n = gather::points_of(&map.table, &item.key).len();
                 rows.push(FilterRow {
@@ -1194,10 +1358,12 @@ fn apply_filters(app: &App, ui: &Ui) {
                 });
             }
         }
+        blocks.push(rows);
     }
+    let rows = ticked_groups_first(blocks);
     let summary = match (rows.is_empty(), chosen) {
         (true, _) => "nothing matches".to_string(),
-        (false, 0) => "nothing selected".to_string(),
+        (false, 0) => String::new(),
         (false, n) => format!("{n} selected"),
     };
     app.set_resource_rows(ModelRc::new(VecModel::from(rows)));
@@ -1218,12 +1384,13 @@ fn apply_filters(app: &App, ui: &Ui) {
         child,
         ..Default::default()
     };
-    let mut monster_rows: Vec<FilterRow> = Vec::new();
+    let mut blocks: Vec<Vec<FilterRow>> = Vec::new();
     for (pet, npcs) in &groups {
         let pet_on = ui.settings.pets.contains(pet);
         let some = npcs.iter().any(|n| ui.settings.monsters.contains(n));
         let expanded = !query.is_empty() || ui.filters.expanded_pets.contains(pet);
         let spawns: usize = npcs.iter().map(|&n| monster_spawn_count(map, n)).sum();
+        let mut monster_rows: Vec<FilterRow> = Vec::new();
         monster_rows.push(FilterRow {
             key: pet.to_string().into(),
             label: pet_label(*pet).into(),
@@ -1238,10 +1405,14 @@ fn apply_filters(app: &App, ui: &Ui) {
             child: false,
         });
         if expanded {
-            monster_rows.extend(npcs.iter().map(|&n| monster_row(n, pet_on || ui.settings.monsters.contains(&n), true)));
+            let mut children: Vec<FilterRow> = npcs.iter().map(|&n| monster_row(n, pet_on || ui.settings.monsters.contains(&n), true)).collect();
+            ticked_first(&mut children);
+            monster_rows.extend(children);
         }
+        blocks.push(monster_rows);
     }
-    monster_rows.extend(alone.iter().map(|&n| monster_row(n, ui.settings.monsters.contains(&n), false)));
+    blocks.extend(alone.iter().map(|&n| vec![monster_row(n, ui.settings.monsters.contains(&n), false)]));
+    let monster_rows = ticked_groups_first(blocks);
     let shown_monsters = groups.iter().map(|g| g.1.len()).sum::<usize>() + alone.len();
     let summary = format!("{} pets · {shown_monsters} monsters  ·  {} marked", groups.len(), colors.len());
     app.set_monster_rows(ModelRc::new(VecModel::from(monster_rows)));
@@ -1304,8 +1475,11 @@ fn apply_map(app: &App, ui: &mut Ui, force: bool) {
         ui.map.layer.update(Some(map), &ui.settings.gather_items, &ui.settings.pets, &ui.settings.monsters, faction);
         let quads = map::visible_tiles(map, &view, &mut ui.loader);
         map::markers(map, &view, &ui.map.layer, &live, &mut ui.map.markers);
+        let areas = map::screen_areas(map, &view, &ui.map.layer);
+        let scale = app.window().scale_factor();
         app.set_tiles(to_tiles(quads));
-        app.set_markers(to_markers(&ui.map.markers));
+        app.set_layer(ui.painter.paint(width, height, scale, &ui.map.markers, &areas));
+        app.set_labels(to_labels(&areas));
     }
 
     match position.as_ref().filter(|_| tracked_here) {
@@ -1330,14 +1504,21 @@ fn apply_map(app: &App, ui: &mut Ui, force: bool) {
     if let (Some(a), PositionState::Exact | PositionState::Stale) = (age, state) {
         text.push_str(&format!(" ({a:.0}s)"));
     }
+    let mut elsewhere = false;
     if let Some(p) = position.as_ref() {
         if let Some(m) = p.map {
             if m != map {
+                elsewhere = true;
                 text.push_str(&format!(" on {}", m.title));
             }
         } else if state != PositionState::Unknown {
+            elsewhere = true;
             text.push_str(", map not detected");
         }
+    }
+    // an exact position on the shown map needs no badge
+    if state == PositionState::Exact && !elsewhere {
+        text.clear();
     }
     app.set_position_text(text.into());
     app.set_position_color(state_color(state));
@@ -1345,16 +1526,6 @@ fn apply_map(app: &App, ui: &mut Ui, force: bool) {
     if app.get_map_index() != index {
         app.set_map_index(index);
     }
-    app.set_map_hint(
-        format!(
-            "{}  radius {:.0} m  drag to pan, wheel to zoom{}{}",
-            map.title,
-            ui.settings.map_radius_metres,
-            if ui.loader.loading() { "  loading tiles" } else { "" },
-            if state == PositionState::Unknown { "  |  no position yet: walk near monsters, or teleport" } else { "" }
-        )
-        .into(),
-    );
 
     if let Some(p) = position.as_ref().filter(|p| p.map.is_some() && matches!(p.state, PositionState::Exact | PositionState::Estimated)) {
         if ui.map.last_saved.elapsed() >= Duration::from_secs(10) {
@@ -1376,7 +1547,8 @@ fn apply_map_overlay(overlay: &MapOverlay, ui: &mut Ui, force: bool) {
     let Some(p) = ui.snapshot.position.clone() else { return };
     let Some(map) = p.map else {
         overlay.set_tiles(ModelRc::new(VecModel::from(Vec::<MapTile>::new())));
-        overlay.set_markers(ModelRc::new(VecModel::from(Vec::<MapMarker>::new())));
+        overlay.set_layer(slint::Image::default());
+        overlay.set_labels(ModelRc::new(VecModel::from(Vec::<MapLabel>::new())));
         overlay.set_me_visible(false);
         return;
     };
@@ -1403,8 +1575,11 @@ fn apply_map_overlay(overlay: &MapOverlay, ui: &mut Ui, force: bool) {
         let quads = map::visible_tiles(map, &view, &mut ui.loader);
         let mut markers = Vec::new();
         map::markers(map, &view, &ui.map.overlay_layer, &live, &mut markers);
+        let areas = map::screen_areas(map, &view, &ui.map.overlay_layer);
+        let scale = overlay.window().scale_factor();
         overlay.set_tiles(to_tiles(quads));
-        overlay.set_markers(to_markers(&markers));
+        overlay.set_layer(ui.painter.paint(width, height, scale, &markers, &areas));
+        overlay.set_labels(to_labels(&areas));
     }
     let (me_x, me_y) = view.to_screen(map, p.x as f64, p.y as f64);
     overlay.set_me_visible(p.state != PositionState::Unknown);
@@ -1575,7 +1750,9 @@ fn main() {
     }
 
     desktop::install();
-    let settings = Settings::load();
+    let mut settings = Settings::load();
+    // the overlays start unlocked, so they can be moved; Ctrl+L or their lock button locks them
+    settings.overlays_locked = false;
     let source = match &args.replay {
         Some(path) => Source::Replay { path: path.clone(), speed: args.speed },
         None => Source::Live {
@@ -1610,6 +1787,7 @@ fn main() {
         sessions_shown: usize::MAX,
         sessions_count: 0,
         loader: TileLoader::new(),
+        painter: map::LayerPainter::default(),
         map: MapState {
             manual: None,
             center,
@@ -1632,6 +1810,8 @@ fn main() {
         selections: Rc::new(Selections::new()),
         overlay_pan: (0.0, 0.0),
         lanes_from: RefCell::new(None),
+        profile_shown: None,
+        chart_curves: RefCell::new((Vec::new(), 1.0)),
     }));
 
     app.set_map_names(ModelRc::new(VecModel::from(maps::all().iter().map(|m| SharedString::from(m.title.as_str())).collect::<Vec<_>>())));
@@ -1648,11 +1828,19 @@ fn main() {
     app.set_overlays_locked(settings.overlays_locked);
     app.set_overlay_opacity(settings.overlay_opacity);
     app.set_overlay_radius(settings.overlay_radius_metres as f32);
-    app.set_tab(args.tab.max(0));
+    app.set_tab(if args.tab == SETTINGS_TAB { 1 } else { args.tab });
+    if args.tab == 2 {
+        app.set_dps_tab(2);
+    }
     app.set_settings_open(args.tab == SETTINGS_TAB);
     app.set_meter_range(settings.meter_range as i32);
     app.set_pet_overlay(settings.pet_overlay);
     app.set_pet_overlay_target(settings.pet_overlay_target);
+    app.set_pet_auto_pin(settings.pet_auto_pin);
+    app.set_pet_species_names(ModelRc::new(VecModel::from(
+        std::iter::once("All types".to_string()).chain(pet_species()).map(SharedString::from).collect::<Vec<_>>(),
+    )));
+    app.set_sidebar_width(settings.sidebar_width.clamp(240.0, 900.0));
     map_overlay.set_locked(settings.overlays_locked);
     map_overlay.set_overlay_opacity(settings.overlay_opacity);
     apply_filters(&app, &ui.borrow());
@@ -1723,6 +1911,20 @@ fn main() {
         let ui = ui.clone();
         let weak = app.as_weak();
         app.on_buff_mode_changed(move |_| apply_timeline(&weak.unwrap(), &ui.borrow()));
+    }
+    {
+        let ui = ui.clone();
+        let weak = app.as_weak();
+        app.on_chart_click(move |x, y| {
+            let hit = {
+                let u = ui.borrow();
+                let curves = u.chart_curves.borrow();
+                chart::line_at(curves.0.iter().map(|(id, v)| (*id, v.as_slice())), curves.1, x, y)
+            };
+            if let Some(id) = hit {
+                weak.unwrap().invoke_select_row(id);
+            }
+        });
     }
     {
         let ui = ui.clone();
@@ -1922,9 +2124,7 @@ fn main() {
             if let Ok(pet) = key.parse::<i32>() {
                 toggle_pet(&mut u.settings, pet, on);
             }
-            u.settings.save();
-            apply_filters(&app, &u);
-            apply_map(&app, &mut u, true);
+            monsters_changed(&app, &mut u);
         });
     }
     {
@@ -1936,9 +2136,7 @@ fn main() {
             if let Ok(npc) = key.parse::<i32>() {
                 toggle_monster(&mut u.settings, npc, on);
             }
-            u.settings.save();
-            apply_filters(&app, &u);
-            apply_map(&app, &mut u, true);
+            monsters_changed(&app, &mut u);
         });
     }
     {
@@ -1993,9 +2191,7 @@ fn main() {
             let (groups, alone) = monster_groups(displayed_map(&u), u.filters.monster_query.trim());
             u.settings.pets.extend(groups.iter().map(|g| g.0));
             u.settings.monsters.extend(alone);
-            u.settings.save();
-            apply_filters(&app, &u);
-            apply_map(&app, &mut u, true);
+            monsters_changed(&app, &mut u);
         });
     }
     {
@@ -2006,9 +2202,7 @@ fn main() {
             let mut u = ui.borrow_mut();
             u.settings.pets.clear();
             u.settings.monsters.clear();
-            u.settings.save();
-            apply_filters(&app, &u);
-            apply_map(&app, &mut u, true);
+            monsters_changed(&app, &mut u);
         });
     }
     {
@@ -2066,10 +2260,8 @@ fn main() {
             } else if let Some(npc) = key.strip_prefix("m:").and_then(|id| id.parse::<i32>().ok()) {
                 toggle_monster(&mut u.settings, npc, on);
             }
-            u.settings.save();
-            apply_filters(&app, &u);
+            monsters_changed(&app, &mut u);
             apply_overlay_search(&o, &u);
-            apply_map(&app, &mut u, true);
             apply_map_overlay(&o, &mut u, true);
         });
     }
@@ -2297,6 +2489,11 @@ fn main() {
     {
         let ui = ui.clone();
         let weak = app.as_weak();
+        app.on_pet_sort_changed(move || apply_pets(&weak.unwrap(), &ui.borrow()));
+    }
+    {
+        let ui = ui.clone();
+        let weak = app.as_weak();
         app.on_toggle_pin(move |pet, on| {
             let mut u = ui.borrow_mut();
             if on {
@@ -2304,6 +2501,8 @@ fn main() {
             } else {
                 u.settings.pinned_pets.remove(&pet);
             }
+            // a pin changed by hand is the user's: ticking on the map does not undo it
+            u.settings.auto_pinned.remove(&pet);
             u.settings.save();
             apply_pets(&weak.unwrap(), &u);
             apply_pet_overlay(&u);
@@ -2315,9 +2514,37 @@ fn main() {
         app.on_clear_pins(move || {
             let mut u = ui.borrow_mut();
             u.settings.pinned_pets.clear();
+            u.settings.auto_pinned.clear();
             u.settings.save();
             apply_pets(&weak.unwrap(), &u);
             apply_pet_overlay(&u);
+        });
+    }
+    {
+        let ui = ui.clone();
+        let weak = app.as_weak();
+        app.on_pet_auto_pin_changed(move |on| {
+            let app = weak.unwrap();
+            let mut u = ui.borrow_mut();
+            u.settings.pet_auto_pin = on;
+            monsters_changed(&app, &mut u);
+        });
+    }
+    {
+        let ui = ui.clone();
+        let weak = app.as_weak();
+        app.on_boss_search(move |text| {
+            let mut u = ui.borrow_mut();
+            u.filters.boss_query = text.to_string();
+            apply_bosses(&weak.unwrap(), &u);
+        });
+    }
+    {
+        let ui = ui.clone();
+        app.on_sidebar_width_changed(move |width| {
+            let mut u = ui.borrow_mut();
+            u.settings.sidebar_width = width;
+            u.settings.save();
         });
     }
     {
@@ -2440,6 +2667,9 @@ fn main() {
                 if app.get_tab() == 1 && app.get_filter_tab() == 2 {
                     apply_bosses(&app, &u);
                 }
+                if app.get_tab() == PROFILE_TAB {
+                    apply_profile(&app, &mut u);
+                }
                 if let Some(name) = u.snapshot.learned_name.clone() {
                     if !learned_saved && name != u.settings.own_character_name {
                         learned_saved = true;
@@ -2448,6 +2678,12 @@ fn main() {
                         app.set_own_name(name.into());
                     }
                 }
+            }
+            if app.get_tab() == PROFILE_TAB && u.profile_shown.is_none() {
+                apply_profile(&app, &mut u);
+            }
+            if app.get_tab() == 1 && app.get_filter_tab() == 2 && app.get_boss_rows().row_count() == 0 && app.get_boss_summary().is_empty() {
+                apply_bosses(&app, &u);
             }
             if app.get_tab() == PETS_TAB && app.get_pet_rows().row_count() == 0 && app.get_pet_filter() == 0 && u.filters.pet_query.is_empty() {
                 apply_pets(&app, &u);

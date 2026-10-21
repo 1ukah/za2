@@ -101,18 +101,12 @@ export struct MapTile {
     size: length,
 }
 
-export struct MapMarker {
+// The name of a spawn area, centred on (x, y): the middle under the area's bottom edge.
+export struct MapLabel {
     x: length,
     y: length,
-    size: length,
+    text: string,
     color: color,
-    // game icon drawn instead of the dot (empty: a dot)
-    icon: image,
-    // a monster without a portrait: the monster glyph instead of the dot
-    glyph: bool,
-    live: bool,
-    // 1 above the player, -1 below, 0 level or unknown
-    level: int,
 }
 
 // One line of the resource or monster list. A header is a resource group that can be expanded.
@@ -132,6 +126,19 @@ export struct FilterRow {
     glyph: bool,
     // a monster under its pet: indented
     child: bool,
+}
+
+// One line of the profile: "Combat power", "113,456".
+export struct ProfileItem {
+    label: string,
+    value: string,
+    // drawn in the warm colour (Odyle energy)
+    accent: bool,
+}
+
+export struct ProfileSection {
+    title: string,
+    items: [ProfileItem],
 }
 
 // One pet with its level and how far it is to the next: "12/25", "13 left" (or "Max").
@@ -344,6 +351,7 @@ component Segment inherits Rectangle {
     HorizontalLayout {
         padding-left: 10px;
         padding-right: 10px;
+        spacing: 6px;
         alignment: center;
         if root.icon != "": Icon {
             y: (parent.height - self.height) / 2;
@@ -707,6 +715,45 @@ component SwitchRow inherits Rectangle {
     }
 }
 
+// A column title that sorts the list: a click sorts by it, a second click turns the order round.
+component SortHeader inherits Rectangle {
+    in property <string> text;
+    in property <int> column;
+    in-out property <int> sort;
+    in-out property <bool> descending;
+    in property <TextHorizontalAlignment> align: left;
+    callback changed();
+    property <bool> active: root.sort == root.column;
+    HorizontalLayout {
+        spacing: 3px;
+        alignment: root.align == TextHorizontalAlignment.right ? end : root.align == TextHorizontalAlignment.center ? center : start;
+        SectionTitle {
+            text: root.text;
+            color: root.active ? Theme.accent : touch.has-hover ? Theme.muted : Theme.faint;
+        }
+        if root.active: Icon {
+            y: (parent.height - self.height) / 2;
+            width: 12px;
+            height: 12px;
+            commands: root.descending ? Icons.chevron-down : "M6 15 l6-6 6 6";
+            tint: Theme.accent;
+            stroke-width: 2px;
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            if (root.active) {
+                root.descending = !root.descending;
+            } else {
+                root.sort = root.column;
+                root.descending = false;
+            }
+            root.changed();
+        }
+    }
+}
+
 // A field's caption (zodiak's "field" label).
 component FieldLabel inherits Text {
     color: #a9abba;
@@ -862,7 +909,8 @@ component RailButton inherits Rectangle {
 
 component MapView inherits Rectangle {
     in property <[MapTile]> tiles;
-    in property <[MapMarker]> markers;
+    in property <image> layer;
+    in property <[MapLabel]> labels;
     in property <bool> me-visible;
     in property <length> me-x;
     in property <length> me-y;
@@ -889,57 +937,30 @@ component MapView inherits Rectangle {
         image-fit: fill;
     }
 
-    // a dot, or the game icon in a ring of the marker colour (a cube's group, a pet's palette colour)
-    for m in markers: Rectangle {
-        property <bool> ringed: m.icon.width > 0 || m.glyph;
-        // the ring and the arrow grow with the marker (its size follows the zoom)
-        property <length> ring: max(2px, m.size * 0.09);
-        x: m.x - m.size / 2;
-        y: m.y - m.size / 2;
-        width: m.size;
-        height: m.size;
-        border-radius: m.size / 2;
-        background: self.ringed ? #000000a0 : m.color;
-        border-width: self.ringed ? self.ring : m.live ? 2px : 1px;
-        border-color: self.ringed ? (m.live ? m.color : m.color.with-alpha(0.6)) : m.live ? #ffffff : #00000099;
-        // clipped to the circle, so a square icon fits the ring
-        if m.icon.width > 0: Rectangle {
-            x: parent.ring;
-            y: parent.ring;
-            width: parent.width - 2 * parent.ring;
-            height: parent.height - 2 * parent.ring;
-            border-radius: self.width / 2;
-            clip: true;
-            Image {
-                width: parent.width;
-                height: parent.height;
-                source: m.icon;
-                image-fit: contain;
-                opacity: m.live ? 1 : 0.8;
-            }
-        }
-        if m.glyph: Icon {
-            x: parent.width * 0.2;
-            y: parent.height * 0.2;
-            width: parent.width * 0.6;
-            height: parent.height * 0.6;
-            commands: Icons.skull;
-            tint: m.color;
-            stroke-width: max(1.2px, m.size * 0.07);
-            opacity: m.live ? 1 : 0.8;
-        }
-        if m.level != 0: Path {
-            property <float> k: max(1, m.size / 22px);
-            x: m.size - 3px * self.k;
-            y: -6px * self.k;
-            width: 9px * self.k;
-            height: 8px * self.k;
-            viewbox-width: 9;
-            viewbox-height: 8;
-            commands: m.level > 0 ? "M 4.5 0 L 9 8 L 0 8 Z" : "M 0 0 L 9 0 L 4.5 8 Z";
-            fill: #ffffff;
-            stroke: #000000;
-            stroke-width: 1px;
+    // the markers and spawn areas, drawn by za2 into one image (see map::LayerPainter)
+    Image {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        source: root.layer;
+        image-fit: fill;
+    }
+
+    for l in labels: Rectangle {
+        x: l.x - self.width / 2;
+        y: l.y + 2px;
+        width: label-text.preferred-width + 10px;
+        height: 18px;
+        border-radius: 9px;
+        background: #0b0c0fb8;
+        label-text := Text {
+            x: 5px;
+            text: l.text;
+            color: l.color;
+            font-size: 11px;
+            font-weight: 700;
+            vertical-alignment: center;
         }
     }
 
@@ -1598,7 +1619,8 @@ export component MeterOverlay inherits Window {
 
 export component MapOverlay inherits Window {
     in property <[MapTile]> tiles;
-    in property <[MapMarker]> markers;
+    in property <image> layer;
+    in property <[MapLabel]> labels;
     in property <bool> me-visible;
     in property <length> me-x;
     in property <length> me-y;
@@ -1641,7 +1663,8 @@ export component MapOverlay inherits Window {
         clip: true;
         map := MapView {
             tiles: root.tiles;
-            markers: root.markers;
+            layer: root.layer;
+            labels: root.labels;
             me-visible: root.me-visible;
             me-x: root.me-x;
             me-y: root.me-y;
@@ -1688,6 +1711,10 @@ export component MapOverlay inherits Window {
         IconButton { width: 26px; height: 26px; icon-size: 15px; boxed: true; icon: Icons.minus; clicked => { root.zoom-by(-120); } }
         IconButton { width: 26px; height: 26px; icon-size: 15px; boxed: true; icon: Icons.plus; clicked => { root.zoom-by(120); } }
         IconButton { width: 26px; height: 26px; icon-size: 15px; boxed: true; icon: Icons.lock-open; clicked => { root.toggle-lock(); } }
+    }
+    // a click anywhere outside the search closes it
+    if !root.locked && root.search-open: TouchArea {
+        clicked => { root.search-open = false; }
     }
     if !root.locked && root.search-open: Rectangle {
         x: 6px;
@@ -1751,7 +1778,13 @@ export component App inherits Window {
     min-height: 480px;
     default-font-size: 13px;
 
-    in-out property <int> tab: 0;
+    in-out property <int> tab: 1;
+    // the DPS page shows the meter (0) or the timeline (2); the rail button returns to the last one
+    in-out property <int> dps-tab: 0;
+    function open-dps() {
+        root.tab = root.dps-tab;
+        if (root.tab == 2) { root.chart-resized(); }
+    }
 
     in property <string> capture-state;
     in property <color> capture-color: Theme.muted;
@@ -1782,6 +1815,8 @@ export component App inherits Window {
     in-out property <float> chart-cursor: -1;
     callback chart-resized();
     callback chart-hover(float);
+    // a click on the chart at (x, y), 0..1 of its size: selects the player whose line is there
+    callback chart-click(float, float);
     in-out property <int> buff-mode: 0;
     callback buff-mode-changed(int);
     in property <string> buff-title;
@@ -1791,9 +1826,16 @@ export component App inherits Window {
     // field bosses of the shown map
     in property <[BossRow]> boss-rows;
     in property <string> boss-summary;
+    in-out property <string> boss-query;
+    callback boss-search(string);
     callback focus-boss(int);
-    // Odyle energy: "15 (+340)"; empty when unknown
-    in property <string> odyle-text;
+    // width of the list beside the map; the user drags its left edge
+    in-out property <length> sidebar-width: 300px;
+    callback sidebar-width-changed(length);
+
+    // profile tab: what is known of the own character, label and value per line, in sections
+    in property <[ProfileSection]> profile;
+    in property <string> profile-empty;
     in-out property <int> selected-row: -1;
     in-out property <int> scope: 0;
     in property <[string]> session-names: ["Current"];
@@ -1811,7 +1853,8 @@ export component App inherits Window {
     callback overlay-changed(OverlayConfigRow);
 
     in property <[MapTile]> tiles;
-    in property <[MapMarker]> markers;
+    in property <image> layer;
+    in property <[MapLabel]> labels;
     in property <bool> me-visible;
     in property <length> me-x;
     in property <length> me-y;
@@ -1825,7 +1868,6 @@ export component App inherits Window {
     in property <[string]> map-names;
     in-out property <int> map-index;
     in-out property <bool> follow: true;
-    in property <string> map-hint;
     in-out property <length> map-width;
     in-out property <length> map-height;
     callback pan-by(length, length);
@@ -1883,10 +1925,20 @@ export component App inherits Window {
     in-out property <string> pet-query;
     // 0 all, 1 pinned, 2 not at max yet
     in-out property <int> pet-filter: 0;
+    // the pet type shown: 0 all types, then the types in `pet-species-names`
+    in property <[string]> pet-species-names: ["All types"];
+    in-out property <int> pet-species: 0;
     in-out property <bool> pet-overlay;
     in-out property <bool> pet-overlay-target: true;
+    // ticking a pet or its monster on the map pins the pet to the pet overlay
+    in-out property <bool> pet-auto-pin: true;
+    callback pet-auto-pin-changed(bool);
     callback pet-search(string);
     callback pet-filter-changed(int);
+    // the column the pets are sorted by: 0 name, 1 level, 2 progress, 3 kills left
+    in-out property <int> pet-sort: 0;
+    in-out property <bool> pet-sort-desc;
+    callback pet-sort-changed();
     callback toggle-pin(int, bool);
     callback clear-pins();
     callback pet-overlay-changed(bool);
@@ -1940,10 +1992,10 @@ export component App inherits Window {
                 if (e.modifiers.control && e.text == "m") { root.map-overlay = !root.map-overlay; root.map-overlay-changed(root.map-overlay); return accept; }
                 if (e.modifiers.control && e.text == "l") { root.overlays-locked = !root.overlays-locked; root.lock-changed(root.overlays-locked); return accept; }
                 if (e.modifiers.control && e.text == "p") { root.pet-overlay = !root.pet-overlay; root.pet-overlay-changed(root.pet-overlay); return accept; }
-                if (e.text == "1") { root.tab = 0; return accept; }
-                if (e.text == "2") { root.tab = 1; return accept; }
-                if (e.text == "3") { root.settings-open = true; return accept; }
-                if (e.text == "4") { root.tab = 3; return accept; }
+                if (e.text == "1") { root.tab = 1; return accept; }
+                if (e.text == "2") { root.open-dps(); return accept; }
+                if (e.text == "3") { root.tab = 3; return accept; }
+                if (e.text == "4") { root.tab = 4; return accept; }
                 if (e.text == Key.Escape && root.settings-open) { root.settings-open = false; return accept; }
                 reject
             }
@@ -2005,6 +2057,47 @@ export component App inherits Window {
                             padding: 16px;
                             spacing: 12px;
 
+                            // DPS: the meter and the timeline, as sub tabs
+                            // the sub tabs in the middle; the fight or total and the encounter at the right hold for both
+                            if root.tab == 0 || root.tab == 2: VerticalLayout {
+                                spacing: 12px;
+                                Rectangle {
+                                    height: 34px;
+                                    // centred on the page, whatever is at the right
+                                    tabs := SegmentBar {
+                                        x: (parent.width - self.width) / 2;
+                                        width: self.preferred-width;
+                                        HorizontalLayout {
+                                            padding: 3px;
+                                            spacing: 2px;
+                                            Segment { text: "Meter"; icon: Icons.swords; active: root.tab == 0; clicked => { root.dps-tab = 0; root.tab = 0; } }
+                                            Segment { text: "Timeline"; icon: Icons.chart-line; active: root.tab == 2; clicked => { root.dps-tab = 2; root.tab = 2; root.chart-resized(); } }
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        x: max(tabs.x + tabs.width + 10px, parent.width - self.preferred-width);
+                                        width: self.preferred-width;
+                                        spacing: 10px;
+                                        SegmentBar {
+                                            HorizontalLayout {
+                                                padding: 3px;
+                                                spacing: 2px;
+                                                Segment { text: "Fight"; active: root.meter-range == 0; clicked => { root.meter-range = 0; root.meter-range-changed(0); } }
+                                                Segment { text: "Total"; active: root.meter-range == 1; clicked => { root.meter-range = 1; root.meter-range-changed(1); } }
+                                            }
+                                        }
+                                        Dropdown {
+                                            icon: Icons.history;
+                                            model: root.session-names;
+                                            current-index <=> root.session-index;
+                                            selected(i) => { root.session-selected(i); }
+                                            width: 220px;
+                                        }
+                                    }
+                                }
+                                Rectangle { height: 1px; background: Theme.border; }
+                            }
+
                             // meter
                             if root.tab == 0: HorizontalLayout {
                                 spacing: 12px;
@@ -2024,27 +2117,8 @@ export component App inherits Window {
                                                 Text { text: root.encounter-time; color: Theme.text; font-size: 22px; font-weight: 700; }
                                                 Text { text: root.encounter-total; color: Theme.muted; vertical-alignment: bottom; }
                                                 if root.ttk-text != "": Text { text: root.ttk-text; color: Theme.text; font-weight: 600; vertical-alignment: bottom; }
-                                                if root.ping-text != "": PingBadge { text: root.ping-text; tint: root.ping-color; }
-                                                if root.odyle-text != "": Text { text: "Odyle " + root.odyle-text; color: Theme.warn; font-size: 12px; vertical-alignment: bottom; }
                                             }
                                             Text { text: root.encounter-info; color: Theme.faint; font-size: 12px; overflow: elide; }
-                                        }
-                                        SegmentBar {
-                                            y: (parent.height - self.height) / 2;
-                                            HorizontalLayout {
-                                                padding: 3px;
-                                                spacing: 2px;
-                                                Segment { text: "Fight"; active: root.meter-range == 0; clicked => { root.meter-range = 0; root.meter-range-changed(0); } }
-                                                Segment { text: "Total"; active: root.meter-range == 1; clicked => { root.meter-range = 1; root.meter-range-changed(1); } }
-                                            }
-                                        }
-                                        Dropdown {
-                                            y: (parent.height - self.height) / 2;
-                                            icon: Icons.history;
-                                            model: root.session-names;
-                                            current-index <=> root.session-index;
-                                            selected(i) => { root.session-selected(i); }
-                                            width: 240px;
                                         }
                                         SegmentBar {
                                             y: (parent.height - self.height) / 2;
@@ -2057,6 +2131,12 @@ export component App inherits Window {
                                             }
                                         }
                                         IconButton { y: (parent.height - self.height) / 2; boxed: true; icon: Icons.rotate-ccw; clicked => { root.reset(); } }
+                                        Toggle {
+                                            y: (parent.height - self.height) / 2;
+                                            text: "Overlay";
+                                            checked <=> root.meter-overlay;
+                                            toggled(on) => { root.meter-overlay-changed(on); }
+                                        }
                                     }
                                     HorizontalLayout {
                                         padding-left: 12px;
@@ -2082,11 +2162,6 @@ export component App inherits Window {
                                                 clicked => { root.select-row(row.id); }
                                             }
                                         }
-                                    }
-                                    if root.rows.length == 0: Muted {
-                                        text: "No damage yet. Damage appears when the game sends combat frames.";
-                                        horizontal-alignment: center;
-                                        height: 40px;
                                     }
                                 }
                                 Card {
@@ -2143,23 +2218,6 @@ export component App inherits Window {
                                             Text { text: root.encounter-total; color: Theme.muted; vertical-alignment: bottom; }
                                         }
                                         Text { text: root.encounter-info; color: Theme.faint; font-size: 12px; overflow: elide; }
-                                    }
-                                    SegmentBar {
-                                        y: (parent.height - self.height) / 2;
-                                        HorizontalLayout {
-                                            padding: 3px;
-                                            spacing: 2px;
-                                            Segment { text: "Fight"; active: root.meter-range == 0; clicked => { root.meter-range = 0; root.meter-range-changed(0); } }
-                                            Segment { text: "Total"; active: root.meter-range == 1; clicked => { root.meter-range = 1; root.meter-range-changed(1); } }
-                                        }
-                                    }
-                                    Dropdown {
-                                        y: (parent.height - self.height) / 2;
-                                        icon: Icons.history;
-                                        model: root.session-names;
-                                        current-index <=> root.session-index;
-                                        selected(i) => { root.session-selected(i); }
-                                        width: 240px;
                                     }
                                 }
                                 Card {
@@ -2239,6 +2297,8 @@ export component App inherits Window {
                                                     vertical-alignment: center;
                                                 }
                                                 hover := TouchArea {
+                                                    mouse-cursor: pointer;
+                                                    clicked => { root.chart-click(self.mouse-x / self.width, self.mouse-y / self.height); }
                                                     moved => { root.chart-hover(self.mouse-x / self.width); }
                                                     changed has-hover => { if (!self.has-hover) { root.chart-hover(-1); } }
                                                 }
@@ -2332,6 +2392,14 @@ export component App inherits Window {
                                         text <=> root.pet-query;
                                         edited(t) => { root.pet-search(t); }
                                     }
+                                    Dropdown {
+                                        y: (parent.height - self.height) / 2;
+                                        width: 150px;
+                                        icon: Icons.paw-print;
+                                        model: root.pet-species-names;
+                                        current-index <=> root.pet-species;
+                                        selected(i) => { root.pet-filter-changed(root.pet-filter); }
+                                    }
                                     SegmentBar {
                                         y: (parent.height - self.height) / 2;
                                         HorizontalLayout {
@@ -2376,10 +2444,10 @@ export component App inherits Window {
                                     spacing: 10px;
                                     height: 16px;
                                     Rectangle { width: 28px; }
-                                    SectionTitle { text: "PET"; horizontal-stretch: 1; }
-                                    SectionTitle { text: "LEVEL"; width: 52px; }
-                                    SectionTitle { text: "PROGRESS"; width: 120px; horizontal-alignment: center; }
-                                    SectionTitle { text: "LEFT"; width: 78px; horizontal-alignment: right; }
+                                    SortHeader { text: "PET"; column: 0; sort <=> root.pet-sort; descending <=> root.pet-sort-desc; changed => { root.pet-sort-changed(); } horizontal-stretch: 1; }
+                                    SortHeader { text: "LEVEL"; column: 1; sort <=> root.pet-sort; descending <=> root.pet-sort-desc; changed => { root.pet-sort-changed(); } width: 52px; }
+                                    SortHeader { text: "PROGRESS"; column: 2; sort <=> root.pet-sort; descending <=> root.pet-sort-desc; changed => { root.pet-sort-changed(); } width: 120px; align: center; }
+                                    SortHeader { text: "LEFT"; column: 3; sort <=> root.pet-sort; descending <=> root.pet-sort-desc; changed => { root.pet-sort-changed(); } width: 78px; align: right; }
                                     SectionTitle { text: "PIN"; width: 28px; horizontal-alignment: center; }
                                 }
                                 ListView {
@@ -2396,6 +2464,36 @@ export component App inherits Window {
                                     text: root.pet-filter == 1 ? "No pinned pets. Click a pet in All to pin it to the overlay." : "No pet matches.";
                                     horizontal-alignment: center;
                                     height: 40px;
+                                }
+                            }
+
+                            if root.tab == 4: VerticalLayout {
+                                spacing: 12px;
+                                if root.profile.length == 0: Muted {
+                                    text: root.profile-empty;
+                                    horizontal-alignment: center;
+                                    height: 40px;
+                                }
+                                Flickable {
+                                    vertical-stretch: 1;
+                                    content-height: profile-grid.preferred-height;
+                                    profile-grid := VerticalLayout {
+                                        spacing: 12px;
+                                        alignment: start;
+                                        for section in root.profile: Card {
+                                            VerticalLayout {
+                                                padding: 14px;
+                                                spacing: 4px;
+                                                SectionTitle { text: section.title; height: 20px; }
+                                                for item in section.items: HorizontalLayout {
+                                                    height: 26px;
+                                                    spacing: 12px;
+                                                    Text { text: item.label; color: Theme.muted; width: 180px; vertical-alignment: center; overflow: elide; }
+                                                    Text { text: item.value; color: item.accent ? Theme.warn : Theme.text; font-weight: 600; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
 
@@ -2416,7 +2514,7 @@ export component App inherits Window {
                                             width: 180px;
                                         }
                                         Rectangle { horizontal-stretch: 1; }
-                                        Rectangle {
+                                        if root.position-text != "": Rectangle {
                                             y: (parent.height - self.height) / 2;
                                             height: 28px;
                                             width: position.preferred-width + 34px;
@@ -2451,6 +2549,12 @@ export component App inherits Window {
                                                 if (root.follow) { root.center-on-player(); }
                                             }
                                         }
+                                        Toggle {
+                                            y: (parent.height - self.height) / 2;
+                                            text: "Overlay";
+                                            checked <=> root.map-overlay;
+                                            toggled(on) => { root.map-overlay-changed(on); }
+                                        }
                                     }
                                     Rectangle {
                                         vertical-stretch: 1;
@@ -2463,7 +2567,8 @@ export component App inherits Window {
                                             changed width => { root.map-width = self.width; }
                                             changed height => { root.map-height = self.height; }
                                             tiles: root.tiles;
-                                            markers: root.markers;
+                                            layer: root.layer;
+                                            labels: root.labels;
                                             me-visible: root.me-visible;
                                             me-x: root.me-x;
                                             me-y: root.me-y;
@@ -2481,27 +2586,34 @@ export component App inherits Window {
                                             IconButton { boxed: true; icon: Icons.plus; clicked => { root.zoom-by(240, root.map-width / 2, root.map-height / 2); } }
                                             IconButton { boxed: true; icon: Icons.minus; clicked => { root.zoom-by(-240, root.map-width / 2, root.map-height / 2); } }
                                         }
-                                        Rectangle {
-                                            x: 10px;
-                                            y: parent.height - self.height - 10px;
-                                            width: min(hint.preferred-width + 20px, parent.width - 70px);
-                                            height: 24px;
-                                            border-radius: 12px;
-                                            background: #101114cc;
-                                            hint := Text {
-                                                x: 10px;
-                                                width: parent.width - 20px;
-                                                text: root.map-hint;
-                                                color: Theme.muted;
-                                                font-size: 11px;
-                                                vertical-alignment: center;
-                                                overflow: elide;
-                                            }
-                                        }
                                     }
                                 }
                                 Card {
-                                    width: 300px;
+                                    width: root.sidebar-width;
+                                    // drag the left edge to make the list wider (long names) or narrower
+                                    grip := TouchArea {
+                                        x: 0px;
+                                        width: 7px;
+                                        mouse-cursor: ew-resize;
+                                        property <length> press-x;
+                                        pointer-event(e) => {
+                                            if (e.kind == PointerEventKind.down) { self.press-x = self.mouse-x; }
+                                            if (e.kind == PointerEventKind.up) { root.sidebar-width-changed(root.sidebar-width); }
+                                        }
+                                        moved => {
+                                            if (self.pressed) {
+                                                root.sidebar-width = clamp(root.sidebar-width - (self.mouse-x - self.press-x), 240px, max(240px, root.width - 68px - 32px - 320px));
+                                            }
+                                        }
+                                    }
+                                    if grip.has-hover || grip.pressed: Rectangle {
+                                        x: 2px;
+                                        y: (parent.height - self.height) / 2;
+                                        width: 3px;
+                                        height: 40px;
+                                        border-radius: 1.5px;
+                                        background: Theme.accent;
+                                    }
                                     VerticalLayout {
                                         padding: 10px;
                                         spacing: 8px;
@@ -2551,7 +2663,12 @@ export component App inherits Window {
                                         if root.filter-tab == 2: VerticalLayout {
                                             vertical-stretch: 1;
                                             spacing: 6px;
-                                            Muted { text: root.boss-summary; font-size: 11px; wrap: word-wrap; }
+                                            SearchField {
+                                                placeholder: "Search field bosses";
+                                                text <=> root.boss-query;
+                                                edited(t) => { root.boss-search(t); }
+                                            }
+                                            if root.boss-summary != "": Muted { text: root.boss-summary; font-size: 11px; wrap: word-wrap; }
                                             ListView {
                                                 vertical-stretch: 1;
                                                 for b in root.boss-rows: Rectangle {
@@ -2710,15 +2827,15 @@ export component App inherits Window {
                                 padding-bottom: 14px;
                                 spacing: 10px;
                                 alignment: start;
-                                HorizontalLayout { alignment: center; RailButton { icon: Icons.swords; tooltip: "Meter"; active: root.tab == 0; clicked => { root.tab = 0; } } }
                                 HorizontalLayout { alignment: center; RailButton { icon: Icons.map; tooltip: "Map"; active: root.tab == 1; clicked => { root.tab = 1; } } }
-                                HorizontalLayout { alignment: center; RailButton { icon: Icons.chart-line; tooltip: "Timeline"; active: root.tab == 2; clicked => { root.tab = 2; root.chart-resized(); } } }
+                                HorizontalLayout { alignment: center; RailButton { icon: Icons.swords; tooltip: "DPS"; active: root.tab == 0 || root.tab == 2; clicked => { root.open-dps(); } } }
                                 HorizontalLayout { alignment: center; RailButton { icon: Icons.paw-print; tooltip: "Pets"; active: root.tab == 3; clicked => { root.tab = 3; } } }
                             }
                             VerticalLayout {
                                 y: parent.height - self.preferred-height;
                                 padding-bottom: 14px;
                                 spacing: 10px;
+                                HorizontalLayout { alignment: center; RailButton { icon: Icons.user-round; tooltip: "Profile"; active: root.tab == 4; clicked => { root.tab = 4; } } }
                                 HorizontalLayout {
                                     alignment: center;
                                     status := Rectangle {
@@ -2736,20 +2853,29 @@ export component App inherits Window {
                                         if status-touch.has-hover: Rectangle {
                                             x: parent.width + 10px;
                                             y: (parent.height - self.height) / 2;
-                                            width: min(status-tip.preferred-width + 16px, 520px);
-                                            height: 26px;
+                                            width: min(tip.preferred-width, 520px);
+                                            height: tip.preferred-height;
                                             border-radius: 6px;
                                             background: Theme.surface-raised;
                                             border-width: 1px;
                                             border-color: Theme.control-border;
-                                            status-tip := Text {
-                                                x: 8px;
-                                                width: parent.width - 16px;
-                                                text: root.capture-state;
-                                                color: Theme.text;
-                                                font-size: 12px;
-                                                vertical-alignment: center;
-                                                overflow: elide;
+                                            tip := VerticalLayout {
+                                                padding-left: 10px;
+                                                padding-right: 10px;
+                                                padding-top: 6px;
+                                                padding-bottom: 6px;
+                                                spacing: 4px;
+                                                Text {
+                                                    text: root.capture-state;
+                                                    color: Theme.text;
+                                                    font-size: 12px;
+                                                    overflow: elide;
+                                                }
+                                                if root.ping-text != "": HorizontalLayout {
+                                                    spacing: 8px;
+                                                    Text { text: "Ping"; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
+                                                    PingBadge { alignment: start; text: root.ping-text; tint: root.ping-color; }
+                                                }
                                             }
                                         }
                                     }
@@ -2875,6 +3001,7 @@ export component App inherits Window {
                                 SwitchRow { text: "Map overlay"; shortcut: "Ctrl M"; checked <=> root.map-overlay; toggled(on) => { root.map-overlay-changed(on); } }
                                 SwitchRow { text: "Pet overlay"; shortcut: "Ctrl P"; checked <=> root.pet-overlay; toggled(on) => { root.pet-overlay-changed(on); } }
                                 SwitchRow { text: "Pet overlay adds the pet of the monster you fight"; checked <=> root.pet-overlay-target; toggled(on) => { root.pet-overlay-target-changed(on); } }
+                                SwitchRow { text: "Pin the pets of the monsters ticked on the map"; checked <=> root.pet-auto-pin; toggled(on) => { root.pet-auto-pin-changed(on); } }
                                 SwitchRow { text: "Lock, click through"; shortcut: "Ctrl L"; checked <=> root.overlays-locked; toggled(on) => { root.lock-changed(on); } }
                                 Rectangle { height: 12px; }
                                 Rectangle { height: 1px; background: Theme.border; }

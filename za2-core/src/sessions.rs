@@ -37,6 +37,11 @@ pub struct SessionRow {
     /// The timed effects on the player.
     #[serde(default)]
     pub buffs: Vec<BuffUptime>,
+    /// What the player hit most, and the timed effects on it.
+    #[serde(default)]
+    pub target: Option<String>,
+    #[serde(default)]
+    pub target_buffs: Vec<BuffUptime>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -99,11 +104,30 @@ pub fn player_rows(combat: &CombatLog, entities: &EntityDirectory) -> Vec<Sessio
                 series: Vec::new(),
                 deaths: Vec::new(),
                 buffs: Vec::new(),
+                target: None,
+                target_buffs: Vec::new(),
             }
         })
         .collect();
     rows.sort_by(|a, b| b.damage.cmp(&a.damage).then(b.heal.cmp(&a.heal)));
     rows
+}
+
+/// What `player` dealt the most damage to in `combat`, with its name.
+pub fn main_target(combat: &CombatLog, entities: &EntityDirectory, player: i32) -> Option<(i32, String)> {
+    let mut on_targets: std::collections::HashMap<i32, i64> = std::collections::HashMap::new();
+    for e in combat.events().iter().filter(|e| e.source == player && !e.is_heal) {
+        *on_targets.entry(e.target).or_default() += e.amount;
+    }
+    let (target, _) = on_targets.into_iter().max_by_key(|t| (t.1, t.0))?;
+    let name = entities
+        .boss_npc_id_of(target)
+        .and_then(crate::catalog::bosses::find)
+        .map(|b| b.name.clone())
+        .or_else(|| entities.monster_name_for(target, "en").map(str::to_string))
+        .or_else(|| entities.name_for(target))
+        .unwrap_or_else(|| format!("#{target}"));
+    Some((target, name))
 }
 
 /// Effects kept per player in a saved session.
@@ -132,6 +156,11 @@ pub fn summarize(zone_id: i32, start: Micros, end: Micros, combat: &CombatLog, e
             row.deaths = combat.deaths().iter().filter(|d| d.1 == row.id).map(|d| (d.0 - from) as f64 / 1e6).collect();
             row.buffs = buffs.uptimes(row.id, from, to);
             row.buffs.truncate(SAVED_BUFFS);
+            if let Some((target, name)) = main_target(combat, entities, row.id) {
+                row.target = Some(name);
+                row.target_buffs = buffs.uptimes(target, from, to);
+                row.target_buffs.truncate(SAVED_BUFFS);
+            }
         }
     }
     Some(SessionSummary {

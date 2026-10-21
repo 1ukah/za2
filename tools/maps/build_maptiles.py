@@ -1,6 +1,10 @@
-"""Builds the transparent map tiles in native resolution.
+"""Builds the map tiles in native resolution.
 
-Usage: python3 build_maptiles.py <dir with the dumped World_*_A textures> <out dir> [Verteron|Altgard|Abyss ...]
+Usage: python3 build_maptiles.py <dir with the dumped World_*_A textures> <out dir> [--mask] [Verteron|Altgard|Abyss ...]
+
+By default every tile of the grid is kept whole, as the game's own map (M) shows it: sea, mist and all. The land mask
+(--mask) guessed the land from the colours and cut away everything else; it also cut away pale ground, flower fields,
+bridges and small islands, which left holes in the map.
 """
 import struct,io,os,json,collections,sys
 from PIL import Image,ImageFilter,ImageChops,ImageDraw
@@ -17,7 +21,8 @@ def fix_edge(im):
         im.paste(strip,(w-n,0))
     return im
 def load(p):
-    d=open(p,'rb').read()
+    # retoc writes the texture header and data to the .uexp beside the .uasset
+    d=open(p[:-7]+'.uexp' if os.path.exists(p[:-7]+'.uexp') else p,'rb').read()
     i=d.rfind(b'PF_');j=d.find(b'\0',i);fmt=d[i:j].decode();w,h,_=struct.unpack('<iii',d[i-16:i-4])
     bpp=0.5 if fmt=='PF_DXT1' else 1.0;fc=b'DXT1' if fmt=='PF_DXT1' else b'DXT5'
     ub=p[:-7]+'.ubulk'
@@ -90,14 +95,14 @@ def build(name,dirn,prefix,grid,vmin=150,hmin=128,minhalo=350,erode=0,band=0,sth
         for cc in range(grid):
             im=load(f'{dirn}/{prefix}_{rr:02d}_{cc:02d}.uasset');tiles[(rr,cc)]=im
             comp.paste(im.resize((t,t),Image.LANCZOS),(rr*t,cc*t))
-    mask=landmask(comp,W,vmin,hmin,minhalo,erode,band,sthr)
+    mask=landmask(comp,W,vmin,hmin,minhalo,erode,band,sthr) if MASK else Image.new('L',(W,W),255)
     d=f'{OUT}/{name}_tiles';os.makedirs(d,exist_ok=True);kept=0
     for (rr,cc),im in tiles.items():
         x0,y0=rr*t,cc*t;mg=3
         region=mask.crop((x0-mg,y0-mg,x0+t+mg,y0+t+mg))
         if region.getbbox() is None: continue
         big=region.resize(((t+2*mg)*(T//t),(t+2*mg)*(T//t)),Image.BICUBIC)
-        k=mg*(T//t);a=big.crop((k,k,k+T,k+T)).point(lambda x:255 if x>127 else 0).filter(ImageFilter.GaussianBlur(max(2,T/400)))
+        k=mg*(T//t);a=big.crop((k,k,k+T,k+T)).point(lambda x:255 if x>127 else 0).filter(ImageFilter.GaussianBlur(max(2,T/400))) if MASK else Image.new('L',(T,T),255)
         if a.getbbox() is None: continue
         rgba=im.convert('RGBA');rgba.putalpha(a);rgba.save(f'{d}/{rr}_{cc}.webp','WEBP',lossless=True,quality=100,method=4);kept+=1
     json.dump({'tile':T,'grid':grid,'x':'file RR = column, CC = row'},open(f'{d}/info.json','w'))
@@ -112,7 +117,9 @@ def build(name,dirn,prefix,grid,vmin=150,hmin=128,minhalo=350,erode=0,band=0,sth
     size=sum(os.path.getsize(f'{d}/{f}') for f in os.listdir(d))//1024//1024
     print(name,'tiles with land',kept,'of',grid*grid,'tile px',T,'->',size,'MB',flush=True)
     bg=Image.new('RGBA',(4096,4096),(30,40,44,255));bg.alpha_composite(full);bg=bg.convert('RGB');bg.thumbnail((1000,1000));bg.save(f'{OUT}/preview_{name}.jpg',quality=85)
-SRC,OUT=sys.argv[1:3]
-which=sys.argv[3:] or ['Verteron','Altgard','Abyss']
+MASK='--mask' in sys.argv
+args=[a for a in sys.argv[1:] if a!='--mask']
+SRC,OUT=args[:2]
+which=args[2:] or ['Verteron','Altgard','Abyss']
 cfg={'Verteron':(SRC,'World_L_A',8,95,100,350,1,28,40),'Altgard':(SRC,'World_D_A',8,95,100,350,1,28),'Abyss':(SRC,'Abyss_Reshanta_A',4,70,92,40,3)}
 for n in which: build(n,*cfg[n])

@@ -104,6 +104,21 @@ pub struct Timeline {
     pub target_buffs: HashMap<i32, (String, Vec<BuffUptime>)>,
 }
 
+/// What is known of the own character, for the Profile tab.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OwnCharacter {
+    pub name: String,
+    pub class: Option<&'static str>,
+    pub level: Option<i32>,
+    pub server_id: Option<u16>,
+    pub guild: Option<String>,
+    /// From the party roster: only while in a party.
+    pub gear_score: Option<u32>,
+    pub combat_power: Option<u64>,
+    /// When the game sent the character record (the login).
+    pub logged_in_at: Option<Micros>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Snapshot {
     pub version: u64,
@@ -138,6 +153,7 @@ pub struct Snapshot {
     /// Estimated time until the local player's target dies (seconds).
     pub time_to_kill: Option<f64>,
     pub character: Option<String>,
+    pub own: Option<OwnCharacter>,
     pub sessions: Arc<Vec<SessionSummary>>,
     pub recording: Option<(PathBuf, u64)>,
     pub memory_status: String,
@@ -178,6 +194,7 @@ impl Default for Snapshot {
             ping: None,
             time_to_kill: None,
             character: None,
+            own: None,
             sessions: Arc::new(Vec::new()),
             recording: None,
             memory_status: String::new(),
@@ -403,6 +420,21 @@ impl Worker {
                 c.level,
                 c.server_id
             )
+        });
+        s.own = s.local_name.clone().or_else(|| entities.local_character().map(|c| c.name.clone())).map(|name| {
+            let record = entities.local_character().filter(|c| c.name == name);
+            let id = local.or_else(|| record.map(|c| c.combat_id));
+            let stats = entities.party_stats(&name);
+            OwnCharacter {
+                class: id.and_then(|id| entities.class_of(id)).or_else(|| record.and_then(|c| za2_core::catalog::skills::class_from_roster_code(c.class_code))),
+                level: record.map(|c| c.level).filter(|&l| l > 0),
+                server_id: record.map(|c| c.server_id).filter(|&s| s > 0),
+                guild: id.and_then(|id| entities.guild_of(id)).map(str::to_string),
+                gear_score: stats.map(|p| p.gear_score).filter(|&g| g > 0),
+                combat_power: stats.and_then(|p| p.combat_power).filter(|&p| p > 0),
+                logged_in_at: record.map(|c| c.received_at),
+                name,
+            }
         });
         s.target = entities.local_hit_target().filter(|t| now - t.1 < 60_000_000).and_then(|(id, _)| {
             let name = entities
@@ -726,18 +758,7 @@ fn timeline_of(log: &CombatLog, buffs: &BuffTimeline, entities: &EntityDirectory
     t.deaths = log.deaths().iter().map(|d| ((d.0 - from) as f64 / 1e6, d.1)).collect();
     for &id in selected {
         t.buffs.insert(id, buffs.uptimes(id, from, to));
-        let mut on_targets: HashMap<i32, i64> = HashMap::new();
-        for e in log.events().iter().filter(|e| e.source == id && !e.is_heal) {
-            *on_targets.entry(e.target).or_default() += e.amount;
-        }
-        if let Some((target, _)) = on_targets.into_iter().max_by_key(|t| t.1) {
-            let name = entities
-                .boss_npc_id_of(target)
-                .and_then(za2_core::catalog::bosses::find)
-                .map(|b| b.name.clone())
-                .or_else(|| entities.monster_name_for(target, "en").map(str::to_string))
-                .or_else(|| entities.name_for(target))
-                .unwrap_or_else(|| format!("#{target}"));
+        if let Some((target, name)) = sessions::main_target(log, entities, id) {
             t.target_buffs.insert(id, (name, buffs.uptimes(target, from, to)));
         }
     }

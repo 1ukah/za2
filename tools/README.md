@@ -37,7 +37,7 @@ The tools read local files only. They do not send data to the network.
 | `icons/build_nodes.py` | Makes `assets/daevanion/nodes.json`: the nodes of the Daevanion boards. |
 | `icons/convert_textures.py` | Writes converted textures as PNG files of one size. |
 | `recording/` | Reads recordings of game traffic. See [recording/README.md](recording/README.md). |
-| `maps/build_maptiles.py` | Makes the map tiles. |
+| `maps/build_maptiles.py` | Makes the map tiles: whole tiles, as the in-game map shows them. `--mask` cuts the sea away (the old output, which also cut away some land). |
 | `maps/export_client_maps.py` | Exports the map tiles and `assets/maps/maps.json` for za2. |
 
 ## Requirements
@@ -268,7 +268,7 @@ The scripts in `recording/` read recordings of game traffic. Use them to examine
 ## Map tiles
 
 1. Dump the world map textures (`UI/Map/WorldMap/<map>/Res/<map>_<RR>_<CC>`) of `World_L_A`, `World_D_A` and `Abyss_Reshanta_A` into one folder.
-2. Make the transparent tiles:
+2. Make the tiles. They are whole, as the game's own map shows them. Add `--mask` for the old transparent tiles, which keep only what looks like land:
 
    ```sh
    python3 tools/maps/build_maptiles.py <texture dir> <tile dir>
@@ -279,6 +279,8 @@ The scripts in `recording/` read recordings of game traffic. Use them to examine
    ```sh
    python3 tools/maps/export_client_maps.py <tile dir> assets/maps tools/maps/calibration.json
    ```
+
+   A whole tile gets no `_a.png` mask; the export deletes the old mask of such a tile.
 
 `calibration.json` holds the conversion from world coordinates to map pixels for each map.
 
