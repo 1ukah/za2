@@ -61,10 +61,10 @@ pub struct Settings {
     pub pet_overlay_size: Option<(f32, f32)>,
     /// The pet overlay also shows the pet of the monster the player fights.
     pub pet_overlay_target: bool,
-    /// Ticking a pet or its monster on the map pins the pet to the pet overlay.
+    /// The pinned pets follow the map: ticking a pet or its monster pins the pet, pinning ticks it, and the other way round.
     pub pet_auto_pin: bool,
-    /// The pets pinned by `pet_auto_pin`: unticking unpins them again (pins made by hand stay).
-    pub auto_pinned: BTreeSet<i32>,
+    /// Field bosses shown on the map (world-map ids).
+    pub shown_bosses: BTreeSet<u32>,
     /// Width (logical pixels) of the list beside the map.
     pub sidebar_width: f32,
 }
@@ -101,7 +101,7 @@ impl Default for Settings {
             pet_overlay_size: None,
             pet_overlay_target: true,
             pet_auto_pin: true,
-            auto_pinned: BTreeSet::new(),
+            shown_bosses: BTreeSet::new(),
             sidebar_width: 300.0,
         }
     }

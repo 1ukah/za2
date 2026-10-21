@@ -9,7 +9,7 @@ mod settings;
 mod worker;
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
@@ -18,7 +18,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use za2_core::catalog::{gather, map_icons, maps, pets};
+use za2_core::catalog::field_bosses::FieldBoss;
 use za2_core::catalog::maps::MapInfo;
+use za2_core::field_bosses::{BossState, FieldBossBoard};
 use za2_core::entities::PositionSource;
 use za2_core::pet_progress::{self, PetState};
 use za2_core::position::PositionState;
@@ -201,6 +203,9 @@ struct Models {
     chart_lines: Rc<VecModel<ChartLine>>,
     chart_marks: Rc<VecModel<ChartMark>>,
     boss_rows: Rc<VecModel<BossRow>>,
+    /// The names and return times of the shown field bosses, on the map and on the map overlay.
+    boss_labels: Rc<VecModel<MapLabel>>,
+    overlay_boss_labels: Rc<VecModel<MapLabel>>,
 }
 
 impl Models {
@@ -212,6 +217,8 @@ impl Models {
             chart_lines: Rc::new(VecModel::default()),
             chart_marks: Rc::new(VecModel::default()),
             boss_rows: Rc::new(VecModel::default()),
+            boss_labels: Rc::new(VecModel::default()),
+            overlay_boss_labels: Rc::new(VecModel::default()),
         };
         app.set_rows(ModelRc::from(models.rows.clone()));
         app.set_pet_rows(ModelRc::from(models.pet_rows.clone()));
@@ -219,6 +226,7 @@ impl Models {
         app.set_chart_lines(ModelRc::from(models.chart_lines.clone()));
         app.set_chart_marks(ModelRc::from(models.chart_marks.clone()));
         app.set_boss_rows(ModelRc::from(models.boss_rows.clone()));
+        app.set_boss_labels(ModelRc::from(models.boss_labels.clone()));
         models
     }
 }
@@ -855,13 +863,32 @@ fn apply_timeline(app: &App, ui: &Ui) {
     );
 }
 
+/// The field bosses of a map, in the order the boss list indexes them.
+fn bosses_of(map: &MapInfo) -> Vec<&'static FieldBoss> {
+    za2_core::catalog::field_bosses::all().iter().filter(|b| map.table.ends_with(&format!("/{}", b.map_key))).collect()
+}
+
+/// What is known of a field boss at `now_ms`: its state ("Up", "in 1:23:45"), colour, place in the list (the ones up
+/// first, then by return), and whether it is up (None: not known).
+fn boss_status(board: &FieldBossBoard, boss: &FieldBoss, now_ms: i64) -> (String, Color, i64, Option<bool>) {
+    let ago = |ms: i64| duration_text_long(((now_ms - ms) / 1000) as f64);
+    match board.state_at(boss.world_id, now_ms) {
+        Some(BossState::Up { .. }) => ("Up".to_string(), Color::from_rgb_u8(0x68, 0xcb, 0xa4), i64::MIN, Some(true)),
+        Some(BossState::Down { back_ms }) if back_ms > 0 => {
+            (format!("in {}", duration_text_long(((back_ms - now_ms) / 1000) as f64)), Color::from_rgb_u8(0xe5, 0xc6, 0x8a), back_ms, Some(false))
+        }
+        Some(BossState::Down { .. }) => ("Down".to_string(), Color::from_rgb_u8(0xf1, 0x7b, 0x87), i64::MAX - 1, Some(false)),
+        Some(BossState::Killed { at_ms }) => (format!("killed {} ago", ago(at_ms)), Color::from_rgb_u8(0xf1, 0x7b, 0x87), i64::MAX - 1, Some(false)),
+        None => ("?".to_string(), Color::from_rgb_u8(0x96, 0x98, 0xa8), i64::MAX, None),
+    }
+}
+
 /// The field bosses of the shown map, with what is known of them.
 fn apply_bosses(app: &App, ui: &Ui) {
     let map = displayed_map(ui);
     let now_ms = ui.snapshot.now / 1000;
     let board = &ui.snapshot.field_bosses;
-    let bosses: Vec<&za2_core::catalog::field_bosses::FieldBoss> =
-        za2_core::catalog::field_bosses::all().iter().filter(|b| map.table.ends_with(&format!("/{}", b.map_key))).collect();
+    let bosses = bosses_of(map);
     let ago = |ms: i64| duration_text_long(((now_ms - ms) / 1000) as f64);
     let query = ui.filters.boss_query.trim();
     let mut rows: Vec<(i64, BossRow)> = bosses
@@ -869,17 +896,11 @@ fn apply_bosses(app: &App, ui: &Ui) {
         .enumerate()
         .filter(|(_, b)| matches_query(&b.name, query))
         .map(|(index, b)| {
-            use za2_core::field_bosses::BossState;
             let seen = board.bosses.get(&b.world_id).map(|s| s.seen_ms);
-            let (status, color, order) = match board.state_at(b.world_id, now_ms) {
-                Some(BossState::Up { .. }) => ("Up".to_string(), Color::from_rgb_u8(0x68, 0xcb, 0xa4), i64::MIN),
-                Some(BossState::Down { back_ms }) if back_ms > 0 => (format!("in {}", duration_text_long(((back_ms - now_ms) / 1000) as f64)), Color::from_rgb_u8(0xe5, 0xc6, 0x8a), back_ms),
-                Some(BossState::Down { .. }) => ("Down".to_string(), Color::from_rgb_u8(0xf1, 0x7b, 0x87), i64::MAX - 1),
-                Some(BossState::Killed { at_ms }) => (format!("killed {} ago", ago(at_ms)), Color::from_rgb_u8(0xf1, 0x7b, 0x87), i64::MAX - 1),
-                None => ("?".to_string(), Color::from_rgb_u8(0x96, 0x98, 0xa8), i64::MAX),
-            };
+            let (status, color, order, _) = boss_status(board, b, now_ms);
             let detail = seen.map_or_else(|| "not seen yet".to_string(), |ms| format!("seen {} ago", ago(ms)));
-            (order, BossRow { name: b.name.clone().into(), status: status.into(), detail: detail.into(), color, index: index as i32 })
+            let shown = ui.settings.shown_bosses.contains(&b.world_id);
+            (order, BossRow { name: b.name.clone().into(), status: status.into(), detail: detail.into(), color, index: index as i32, shown })
         })
         .collect();
     rows.sort_by_key(|r| r.0);
@@ -890,6 +911,28 @@ fn apply_bosses(app: &App, ui: &Ui) {
     };
     sync_model(&ui.models.boss_rows, rows.into_iter().map(|r| r.1).collect());
     app.set_boss_summary(summary.into());
+}
+
+/// The field bosses ticked in the boss list that are in view: their markers, a fingerprint of them (the markers are redrawn
+/// when it changes), and a label under each one that is not up, with its name and when it is back.
+fn boss_marks(ui: &Ui, map: &MapInfo, view: &View) -> (Vec<Marker>, u64, Vec<MapLabel>) {
+    use std::hash::{Hash, Hasher};
+    let now_ms = ui.snapshot.now / 1000;
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    let (mut markers, mut labels) = (Vec::new(), Vec::new());
+    for b in bosses_of(map).into_iter().filter(|b| ui.settings.shown_bosses.contains(&b.world_id)) {
+        let (status, color, _, up) = boss_status(&ui.snapshot.field_bosses, b, now_ms);
+        let rgb8 = (color.red(), color.green(), color.blue());
+        let Some(marker) = map::boss_marker(map, view, b.npc, b.x, b.y, rgb8) else { continue };
+        (b.world_id, rgb8).hash(&mut hash);
+        let text = match up {
+            Some(false) => format!("{} · {status}", b.name),
+            _ => b.name.clone(),
+        };
+        labels.push(MapLabel { x: marker.x, y: marker.y + marker.size / 2.0, text: text.into(), color });
+        markers.push(marker);
+    }
+    (markers, hash.finish(), labels)
 }
 
 /// The Profile tab: what is known of the own character, its pets and the connection.
@@ -1206,29 +1249,47 @@ fn toggle_monster(settings: &mut Settings, npc: i32, on: bool) {
     }
 }
 
-/// With auto-pin on, pins the pets of the ticked pets and monsters to the pet overlay, and unpins the ones it pinned once
-/// nothing of them is ticked any more. Pins made by hand stay.
-fn sync_auto_pins(settings: &mut Settings) {
+/// The pets the map has ticked: the ticked pets and the pets of the ticked monsters.
+fn ticked_pets(settings: &Settings) -> BTreeSet<i32> {
+    settings.pets.iter().copied().chain(settings.monsters.iter().flat_map(|&n| pets::pets_of_npc(n).iter().copied())).collect()
+}
+
+/// With the sync on, the pinned pets are the pets ticked on the map: ticking pins, unticking unpins.
+fn sync_pins(settings: &mut Settings) {
+    if settings.pet_auto_pin {
+        settings.pinned_pets = ticked_pets(settings);
+    }
+}
+
+/// Pins or unpins a pet; with the sync on, also ticks or unticks it (with its monsters) on the map.
+fn set_pin(settings: &mut Settings, pet: i32, on: bool) {
+    if on {
+        settings.pinned_pets.insert(pet);
+    } else {
+        settings.pinned_pets.remove(&pet);
+    }
+    if settings.pet_auto_pin {
+        toggle_pet(settings, pet, on);
+    }
+}
+
+/// Turning the sync on: the pets pinned by hand are ticked on the map, then the pins follow the map.
+fn start_pin_sync(settings: &mut Settings) {
     if !settings.pet_auto_pin {
         return;
     }
-    let wanted: std::collections::BTreeSet<i32> =
-        settings.pets.iter().copied().chain(settings.monsters.iter().flat_map(|&n| pets::pets_of_npc(n).iter().copied())).collect();
-    for &pet in &wanted {
-        if settings.pinned_pets.insert(pet) {
-            settings.auto_pinned.insert(pet);
+    let ticked = ticked_pets(settings);
+    for pet in settings.pinned_pets.clone() {
+        if !ticked.contains(&pet) {
+            toggle_pet(settings, pet, true);
         }
     }
-    let gone: Vec<i32> = settings.auto_pinned.iter().copied().filter(|p| !wanted.contains(p)).collect();
-    for pet in gone {
-        settings.auto_pinned.remove(&pet);
-        settings.pinned_pets.remove(&pet);
-    }
+    sync_pins(settings);
 }
 
 /// After the ticked pets or monsters changed: the pins, the lists and the maps.
 fn monsters_changed(app: &App, u: &mut Ui) {
-    sync_auto_pins(&mut u.settings);
+    sync_pins(&mut u.settings);
     u.settings.save();
     apply_filters(app, u);
     apply_map(app, u, true);
@@ -1461,12 +1522,14 @@ fn apply_map(app: &App, ui: &mut Ui, force: bool) {
         show_live_mobs: ui.settings.show_live_mobs,
         show_cubes: ui.settings.show_cubes,
     };
+    let (bosses, bosses_key, boss_labels) = boss_marks(ui, map, &view);
+    sync_model(&ui.models.boss_labels, boss_labels);
     let key = (
         map.key.clone(),
         (ui.map.center.0.round() as i64, ui.map.center.1.round() as i64),
         (ui.settings.map_radius_metres * 10.0) as i64,
         (width as i64, height as i64),
-        scene_key(&live),
+        scene_key(&live) ^ bosses_key,
     );
     // Tiles and markers are rebuilt only when what they show changed: a new model re-creates every marker element.
     if force || ui.map.last_built.as_ref() != Some(&key) {
@@ -1475,6 +1538,7 @@ fn apply_map(app: &App, ui: &mut Ui, force: bool) {
         ui.map.layer.update(Some(map), &ui.settings.gather_items, &ui.settings.pets, &ui.settings.monsters, faction);
         let quads = map::visible_tiles(map, &view, &mut ui.loader);
         map::markers(map, &view, &ui.map.layer, &live, &mut ui.map.markers);
+        ui.map.markers.extend(bosses);
         let areas = map::screen_areas(map, &view, &ui.map.layer);
         let scale = app.window().scale_factor();
         app.set_tiles(to_tiles(quads));
@@ -1549,6 +1613,7 @@ fn apply_map_overlay(overlay: &MapOverlay, ui: &mut Ui, force: bool) {
         overlay.set_tiles(ModelRc::new(VecModel::from(Vec::<MapTile>::new())));
         overlay.set_layer(slint::Image::default());
         overlay.set_labels(ModelRc::new(VecModel::from(Vec::<MapLabel>::new())));
+        sync_model(&ui.models.overlay_boss_labels, Vec::new());
         overlay.set_me_visible(false);
         return;
     };
@@ -1568,13 +1633,16 @@ fn apply_map_overlay(overlay: &MapOverlay, ui: &mut Ui, force: bool) {
         show_live_mobs: ui.settings.show_live_mobs,
         show_cubes: ui.settings.show_cubes,
     };
-    let key = (map.key.clone(), (center.0 as i64, center.1 as i64), (width as i64, height as i64), scene_key(&live));
+    let (bosses, bosses_key, boss_labels) = boss_marks(ui, map, &view);
+    sync_model(&ui.models.overlay_boss_labels, boss_labels);
+    let key = (map.key.clone(), (center.0 as i64, center.1 as i64), (width as i64, height as i64), scene_key(&live) ^ bosses_key);
     if force || ui.map.last_overlay.as_ref() != Some(&key) {
         ui.map.last_overlay = Some(key);
         ui.map.overlay_layer.update(Some(map), &ui.settings.gather_items, &ui.settings.pets, &ui.settings.monsters, faction_of(&ui.snapshot));
         let quads = map::visible_tiles(map, &view, &mut ui.loader);
         let mut markers = Vec::new();
         map::markers(map, &view, &ui.map.overlay_layer, &live, &mut markers);
+        markers.extend(bosses);
         let areas = map::screen_areas(map, &view, &ui.map.overlay_layer);
         let scale = overlay.window().scale_factor();
         overlay.set_tiles(to_tiles(quads));
@@ -1753,6 +1821,7 @@ fn main() {
     let mut settings = Settings::load();
     // the overlays start unlocked, so they can be moved; Ctrl+L or their lock button locks them
     settings.overlays_locked = false;
+    start_pin_sync(&mut settings);
     let source = match &args.replay {
         Some(path) => Source::Replay { path: path.clone(), speed: args.speed },
         None => Source::Live {
@@ -1765,6 +1834,9 @@ fn main() {
     let _ = commands.send(WorkerCommand::RestoreMap(settings.last_map.clone(), settings.last_x.zip(settings.last_y)));
 
     let app = App::new().expect("cannot create the main window");
+    // Wayland compositors find the icon through the desktop entry named after the app id (see desktop.rs); without
+    // one they show a generic icon in the task switcher. Set before any window is shown.
+    let _ = slint::set_xdg_app_id("za2");
     let map_overlay = MapOverlay::new().expect("cannot create the map overlay");
     let pet_overlay = PetOverlay::new().expect("cannot create the pet overlay");
     let pet_overlay_rows = Rc::new(VecModel::default());
@@ -1813,6 +1885,7 @@ fn main() {
         profile_shown: None,
         chart_curves: RefCell::new((Vec::new(), 1.0)),
     }));
+    map_overlay.set_boss_labels(ModelRc::from(ui.borrow().models.overlay_boss_labels.clone()));
 
     app.set_map_names(ModelRc::new(VecModel::from(maps::all().iter().map(|m| SharedString::from(m.title.as_str())).collect::<Vec<_>>())));
     app.set_own_name(settings.own_character_name.clone().into());
@@ -1933,15 +2006,39 @@ fn main() {
             let app = weak.unwrap();
             let mut u = ui.borrow_mut();
             let map = displayed_map(&u);
-            let boss = za2_core::catalog::field_bosses::all().iter().filter(|b| map.table.ends_with(&format!("/{}", b.map_key))).nth(index.max(0) as usize);
-            if let Some(b) = boss {
+            if let Some(b) = bosses_of(map).get(index.max(0) as usize) {
+                // a boss looked for is shown on the map, so it is found
+                if u.settings.shown_bosses.insert(b.world_id) {
+                    u.settings.save();
+                }
                 u.map.manual = Some(map);
                 u.map.follow = false;
                 u.map.center = (b.x as f64, b.y as f64);
                 app.set_follow(false);
+                apply_bosses(&app, &u);
                 apply_map(&app, &mut u, true);
             }
         });
+    }
+    {
+        let ui = ui.clone();
+        let weak = app.as_weak();
+        let mapo = map_overlay.as_weak();
+        app.on_toggle_boss(move |index, on| {
+            let app = weak.unwrap();
+            let mut u = ui.borrow_mut();
+            let Some(b) = bosses_of(displayed_map(&u)).get(index.max(0) as usize).copied() else { return };
+            if on {
+                u.settings.shown_bosses.insert(b.world_id);
+            } else {
+                u.settings.shown_bosses.remove(&b.world_id);
+            }
+            u.settings.save();
+            apply_bosses(&app, &u);
+            apply_map(&app, &mut u, true);
+            apply_map_overlay(&mapo.unwrap(), &mut u, true);
+        });
+
     }
     {
         let ui = ui.clone();
@@ -2495,29 +2592,22 @@ fn main() {
         let ui = ui.clone();
         let weak = app.as_weak();
         app.on_toggle_pin(move |pet, on| {
+            let app = weak.unwrap();
             let mut u = ui.borrow_mut();
-            if on {
-                u.settings.pinned_pets.insert(pet);
-            } else {
-                u.settings.pinned_pets.remove(&pet);
-            }
-            // a pin changed by hand is the user's: ticking on the map does not undo it
-            u.settings.auto_pinned.remove(&pet);
-            u.settings.save();
-            apply_pets(&weak.unwrap(), &u);
-            apply_pet_overlay(&u);
+            set_pin(&mut u.settings, pet, on);
+            monsters_changed(&app, &mut u);
         });
     }
     {
         let ui = ui.clone();
         let weak = app.as_weak();
         app.on_clear_pins(move || {
+            let app = weak.unwrap();
             let mut u = ui.borrow_mut();
-            u.settings.pinned_pets.clear();
-            u.settings.auto_pinned.clear();
-            u.settings.save();
-            apply_pets(&weak.unwrap(), &u);
-            apply_pet_overlay(&u);
+            for pet in u.settings.pinned_pets.clone() {
+                set_pin(&mut u.settings, pet, false);
+            }
+            monsters_changed(&app, &mut u);
         });
     }
     {
@@ -2527,6 +2617,7 @@ fn main() {
             let app = weak.unwrap();
             let mut u = ui.borrow_mut();
             u.settings.pet_auto_pin = on;
+            start_pin_sync(&mut u.settings);
             monsters_changed(&app, &mut u);
         });
     }
@@ -2789,6 +2880,31 @@ mod tests {
         toggle_monster(&mut settings, 2400746, false);
         assert!(!settings.pets.contains(&1195));
         assert!(others.iter().all(|n| settings.monsters.contains(n)) && !settings.monsters.contains(&2400746));
+    }
+
+    #[test]
+    fn pins_and_map_ticks_follow_each_other() {
+        let mut settings = Settings::default();
+        set_pin(&mut settings, 1195, true);
+        sync_pins(&mut settings);
+        assert!(settings.pets.contains(&1195) && settings.pinned_pets.contains(&1195), "pinning ticks the pet");
+        toggle_pet(&mut settings, 1195, false);
+        sync_pins(&mut settings);
+        assert!(!settings.pinned_pets.contains(&1195), "unticking unpins");
+        toggle_monster(&mut settings, 2400746, true);
+        sync_pins(&mut settings);
+        assert!(settings.pinned_pets.contains(&1195), "ticking a monster pins its pet");
+        set_pin(&mut settings, 1195, false);
+        sync_pins(&mut settings);
+        assert!(!settings.monsters.contains(&2400746) && settings.pinned_pets.is_empty(), "unpinning unticks its monsters");
+    }
+
+    #[test]
+    fn pins_made_before_the_sync_are_ticked() {
+        let mut settings = Settings::default();
+        settings.pinned_pets.insert(1195);
+        start_pin_sync(&mut settings);
+        assert!(settings.pets.contains(&1195) && settings.pinned_pets.contains(&1195));
     }
 
     #[test]

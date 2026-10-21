@@ -287,6 +287,8 @@ pub const LIVE_ICON: MarkerSize = MarkerSize { base: 24.0, min: 20.0, max: 40.0 
 pub const LIVE_OTHER: MarkerSize = MarkerSize { base: 18.0, min: 14.0, max: 30.0 };
 /// Live things without an icon.
 pub const LIVE_DOT: MarkerSize = MarkerSize { base: 13.0, min: 10.0, max: 20.0 };
+/// Field bosses picked in the boss list: bigger than the rest, so they are found at a glance.
+pub const BOSS_ICON: MarkerSize = MarkerSize { base: 32.0, min: 28.0, max: 46.0 };
 /// Spawn places and gathering spots with their icon.
 pub const STATIC_ICON: MarkerSize = MarkerSize { base: 18.0, min: 13.0, max: 32.0 };
 /// Spawn places and gathering spots as a dot: when zoomed far out (so hundreds of icons do not cover the map) or without icon.
@@ -760,6 +762,18 @@ fn draw_sprite(key: SpriteKey, icon: Option<&tiny_skia::Pixmap>) -> Option<tiny_
         pm.stroke_path(&arrow, &paint_color((0, 0, 0), 1.0), &tiny_skia::Stroke { width: 1.0, ..Default::default() }, id, None);
     }
     Some(pm)
+}
+
+/// A field boss at world (x, y) as a marker on the screen: its portrait (or the monster glyph) in a ring of `color`.
+/// None when it is out of view.
+pub fn boss_marker(map: &MapInfo, view: &View, npc: i32, x: f32, y: f32, color: (u8, u8, u8)) -> Option<Marker> {
+    let (hx, hy) = view.world_half_extent();
+    if (x as f64 - view.center_x).abs() > hx * 1.05 || (y as f64 - view.center_y).abs() > hy * 1.05 {
+        return None;
+    }
+    let (sx, sy) = view.to_screen(map, x as f64, y as f64);
+    let icon = monster_icon(npc);
+    Some(Marker { x: sx as f32, y: sy as f32, color, size: BOSS_ICON.at(view.radius_metres), live: true, level: 0, icon, glyph: icon.is_none() })
 }
 
 pub struct LiveInputs<'a> {

@@ -92,6 +92,8 @@ export struct BossRow {
     detail: string,
     color: color,
     index: int,
+    // ticked: its marker and return time show on the map
+    shown: bool,
 }
 
 export struct MapTile {
@@ -907,10 +909,31 @@ component RailButton inherits Rectangle {
 
 // ---------------------------------------------------------------- map
 
+// A name on the map, centred on (x, y) and hanging below it.
+component MapLabelChip inherits Rectangle {
+    in property <MapLabel> data;
+    x: data.x - self.width / 2;
+    y: data.y + 2px;
+    width: label-text.preferred-width + 10px;
+    height: 18px;
+    border-radius: 9px;
+    background: #0b0c0fb8;
+    label-text := Text {
+        x: 5px;
+        text: root.data.text;
+        color: root.data.color;
+        font-size: 11px;
+        font-weight: 700;
+        vertical-alignment: center;
+    }
+}
+
 component MapView inherits Rectangle {
     in property <[MapTile]> tiles;
     in property <image> layer;
     in property <[MapLabel]> labels;
+    // the names and return times of the field bosses shown
+    in property <[MapLabel]> boss-labels;
     in property <bool> me-visible;
     in property <length> me-x;
     in property <length> me-y;
@@ -947,22 +970,8 @@ component MapView inherits Rectangle {
         image-fit: fill;
     }
 
-    for l in labels: Rectangle {
-        x: l.x - self.width / 2;
-        y: l.y + 2px;
-        width: label-text.preferred-width + 10px;
-        height: 18px;
-        border-radius: 9px;
-        background: #0b0c0fb8;
-        label-text := Text {
-            x: 5px;
-            text: l.text;
-            color: l.color;
-            font-size: 11px;
-            font-weight: 700;
-            vertical-alignment: center;
-        }
-    }
+    for l in labels: MapLabelChip { data: l; }
+    for l in boss-labels: MapLabelChip { data: l; }
 
     if me-visible && radar-radius > 0: Rectangle {
         x: me-x - radar-radius;
@@ -1621,6 +1630,7 @@ export component MapOverlay inherits Window {
     in property <[MapTile]> tiles;
     in property <image> layer;
     in property <[MapLabel]> labels;
+    in property <[MapLabel]> boss-labels;
     in property <bool> me-visible;
     in property <length> me-x;
     in property <length> me-y;
@@ -1665,6 +1675,7 @@ export component MapOverlay inherits Window {
             tiles: root.tiles;
             layer: root.layer;
             labels: root.labels;
+            boss-labels: root.boss-labels;
             me-visible: root.me-visible;
             me-x: root.me-x;
             me-y: root.me-y;
@@ -1829,6 +1840,8 @@ export component App inherits Window {
     in-out property <string> boss-query;
     callback boss-search(string);
     callback focus-boss(int);
+    callback toggle-boss(int, bool);
+    in property <[MapLabel]> boss-labels;
     // width of the list beside the map; the user drags its left edge
     in-out property <length> sidebar-width: 300px;
     callback sidebar-width-changed(length);
@@ -1930,7 +1943,7 @@ export component App inherits Window {
     in-out property <int> pet-species: 0;
     in-out property <bool> pet-overlay;
     in-out property <bool> pet-overlay-target: true;
-    // ticking a pet or its monster on the map pins the pet to the pet overlay
+    // the pinned pets follow the pets and monsters ticked on the map, and the other way round
     in-out property <bool> pet-auto-pin: true;
     callback pet-auto-pin-changed(bool);
     callback pet-search(string);
@@ -1946,6 +1959,8 @@ export component App inherits Window {
 
     in-out property <bool> settings-open;
     in-out property <int> settings-tab: 0;
+    // the sub tab of Overlays: 0 general, 1 meter, 2 map, 3 pets
+    in-out property <int> overlay-settings-tab: 0;
     in-out property <string> own-name;
     in-out property <bool> reset-on-zone;
     in-out property <bool> meter-overlay;
@@ -2538,6 +2553,12 @@ export component App inherits Window {
                                                 vertical-alignment: center;
                                             }
                                         }
+                                        Toggle {
+                                            y: (parent.height - self.height) / 2;
+                                            text: "Overlay";
+                                            checked <=> root.map-overlay;
+                                            toggled(on) => { root.map-overlay-changed(on); }
+                                        }
                                         IconButton {
                                             y: (parent.height - self.height) / 2;
                                             boxed: true;
@@ -2548,12 +2569,6 @@ export component App inherits Window {
                                                 root.follow-changed(root.follow);
                                                 if (root.follow) { root.center-on-player(); }
                                             }
-                                        }
-                                        Toggle {
-                                            y: (parent.height - self.height) / 2;
-                                            text: "Overlay";
-                                            checked <=> root.map-overlay;
-                                            toggled(on) => { root.map-overlay-changed(on); }
                                         }
                                     }
                                     Rectangle {
@@ -2569,6 +2584,7 @@ export component App inherits Window {
                                             tiles: root.tiles;
                                             layer: root.layer;
                                             labels: root.labels;
+                                            boss-labels: root.boss-labels;
                                             me-visible: root.me-visible;
                                             me-x: root.me-x;
                                             me-y: root.me-y;
@@ -2619,16 +2635,16 @@ export component App inherits Window {
                                         spacing: 8px;
                                         VerticalLayout {
                                             CheckRow { text: "Live monsters"; checked: root.show-live-mobs; dot: #e05050; glyph: true; toggled(on) => { root.show-live-mobs = on; root.live-mobs-changed(on); } }
-                                            CheckRow { text: "Hidden Cubes"; checked: root.show-cubes; dot: #ffd84d; icon: root.cube-icon; toggled(on) => { root.show-cubes = on; root.cubes-changed(on); } }
                                             HorizontalLayout {
                                                 spacing: 2px;
-                                                CheckRow { horizontal-stretch: 1; text: "Sound near a Hidden Cube"; checked: root.cube-sound; toggled(on) => { root.cube-sound = on; root.cube-sound-changed(on); } }
+                                                CheckRow { horizontal-stretch: 1; text: "Hidden Cubes"; checked: root.show-cubes; dot: #ffd84d; icon: root.cube-icon; toggled(on) => { root.show-cubes = on; root.cubes-changed(on); } }
+                                                // the sound near a Hidden Cube: on or off, volume, test
                                                 IconButton {
                                                     width: 30px;
                                                     height: 30px;
                                                     icon-size: 16px;
                                                     icon: Icons.settings;
-                                                    active: root.sound-panel-open;
+                                                    active: root.sound-panel-open || root.cube-sound;
                                                     clicked => {
                                                         if (root.sound-panel-open) {
                                                             root.close-sound-panel();
@@ -2675,11 +2691,17 @@ export component App inherits Window {
                                                     height: 40px;
                                                     border-radius: 6px;
                                                     background: boss-touch.has-hover ? Theme.surface-hover : transparent;
+                                                    // a click finds the boss on the map (and shows it); the tick shows or hides it
                                                     boss-touch := TouchArea { clicked => { root.focus-boss(b.index); } }
                                                     HorizontalLayout {
                                                         padding-left: 8px;
                                                         padding-right: 8px;
                                                         spacing: 8px;
+                                                        Rectangle {
+                                                            width: 22px;
+                                                            CheckMark { x: 0; y: (parent.height - self.height) / 2; checked: b.shown; }
+                                                            TouchArea { clicked => { root.toggle-boss(b.index, !b.shown); } }
+                                                        }
                                                         Rectangle { width: 8px; height: 8px; y: (parent.height - self.height) / 2; border-radius: 4px; background: b.color; }
                                                         VerticalLayout {
                                                             alignment: center;
@@ -2835,6 +2857,18 @@ export component App inherits Window {
                                 y: parent.height - self.preferred-height;
                                 padding-bottom: 14px;
                                 spacing: 10px;
+                                HorizontalLayout {
+                                    alignment: center;
+                                    RailButton {
+                                        icon: root.overlays-locked ? Icons.lock : Icons.lock-open;
+                                        tooltip: root.overlays-locked ? "Unlock overlays (Ctrl L)" : "Lock overlays (Ctrl L)";
+                                        active: root.overlays-locked;
+                                        clicked => {
+                                            root.overlays-locked = !root.overlays-locked;
+                                            root.lock-changed(root.overlays-locked);
+                                        }
+                                    }
+                                }
                                 HorizontalLayout { alignment: center; RailButton { icon: Icons.user-round; tooltip: "Profile"; active: root.tab == 4; clicked => { root.tab = 4; } } }
                                 HorizontalLayout {
                                     alignment: center;
@@ -2995,84 +3029,110 @@ export component App inherits Window {
                                 if root.recording: Text { text: root.recording-text; color: #888b9e; font-size: 11px; wrap: word-wrap; }
                             }
 
+                            // the overlays, each in its sub tab; General holds what all of them share
                             if root.settings-tab == 1: VerticalLayout {
                                 spacing: 6px;
-                                SwitchRow { text: "Meter overlays"; shortcut: "Ctrl O"; checked <=> root.meter-overlay; toggled(on) => { root.meter-overlay-changed(on); } }
-                                SwitchRow { text: "Map overlay"; shortcut: "Ctrl M"; checked <=> root.map-overlay; toggled(on) => { root.map-overlay-changed(on); } }
-                                SwitchRow { text: "Pet overlay"; shortcut: "Ctrl P"; checked <=> root.pet-overlay; toggled(on) => { root.pet-overlay-changed(on); } }
-                                SwitchRow { text: "Pet overlay adds the pet of the monster you fight"; checked <=> root.pet-overlay-target; toggled(on) => { root.pet-overlay-target-changed(on); } }
-                                SwitchRow { text: "Pin the pets of the monsters ticked on the map"; checked <=> root.pet-auto-pin; toggled(on) => { root.pet-auto-pin-changed(on); } }
-                                SwitchRow { text: "Lock, click through"; shortcut: "Ctrl L"; checked <=> root.overlays-locked; toggled(on) => { root.lock-changed(on); } }
-                                Rectangle { height: 12px; }
-                                Rectangle { height: 1px; background: Theme.border; }
-                                Rectangle { height: 12px; }
-                                for cfg in root.overlay-configs: VerticalLayout {
-                                    spacing: 8px;
-                                    padding-bottom: 14px;
+                                SegmentBar {
                                     HorizontalLayout {
-                                        spacing: 8px;
-                                        height: 30px;
-                                        Text { text: "Meter overlay " + cfg.id; color: #d0cfdd; font-size: 13px; vertical-alignment: center; }
-                                        Rectangle { horizontal-stretch: 1; }
-                                        IconButton {
-                                            y: (parent.height - self.height) / 2;
-                                            width: 28px;
-                                            height: 28px;
-                                            icon-size: 15px;
-                                            icon: Icons.x;
-                                            clicked => { root.overlay-remove(cfg.id); }
-                                        }
-                                        Toggle {
-                                            y: (parent.height - self.height) / 2;
-                                            checked: cfg.enabled;
-                                            toggled(on) => { root.overlay-changed({ id: cfg.id, enabled: on, metric: cfg.metric, range: cfg.range, scope: cfg.scope }); }
-                                        }
+                                        padding: 3px;
+                                        spacing: 2px;
+                                        Segment { horizontal-stretch: 1; text: "General"; active: root.overlay-settings-tab == 0; clicked => { root.overlay-settings-tab = 0; } }
+                                        Segment { horizontal-stretch: 1; text: "Meter"; icon: Icons.swords; active: root.overlay-settings-tab == 1; clicked => { root.overlay-settings-tab = 1; } }
+                                        Segment { horizontal-stretch: 1; text: "Map"; icon: Icons.map; active: root.overlay-settings-tab == 2; clicked => { root.overlay-settings-tab = 2; } }
+                                        Segment { horizontal-stretch: 1; text: "Pets"; icon: Icons.paw-print; active: root.overlay-settings-tab == 3; clicked => { root.overlay-settings-tab = 3; } }
                                     }
-                                    HorizontalLayout {
-                                        spacing: 6px;
-                                        Dropdown {
-                                            horizontal-stretch: 1;
-                                            model: ["Damage", "Healing"];
-                                            current-index: cfg.metric;
-                                            selected(i) => { root.overlay-changed({ id: cfg.id, enabled: cfg.enabled, metric: i, range: cfg.range, scope: cfg.scope }); }
-                                        }
-                                        Dropdown {
-                                            horizontal-stretch: 1;
-                                            model: ["Fight", "Total"];
-                                            current-index: cfg.range;
-                                            selected(i) => { root.overlay-changed({ id: cfg.id, enabled: cfg.enabled, metric: cfg.metric, range: i, scope: cfg.scope }); }
-                                        }
-                                        Dropdown {
-                                            horizontal-stretch: 1;
-                                            model: ["All", "Group", "Me"];
-                                            current-index: cfg.scope;
-                                            selected(i) => { root.overlay-changed({ id: cfg.id, enabled: cfg.enabled, metric: cfg.metric, range: cfg.range, scope: i }); }
-                                        }
-                                    }
-                                }
-                                HorizontalLayout {
-                                    alignment: start;
-                                    TextButton { icon: Icons.plus; text: "Add meter overlay"; clicked => { root.overlay-add(); } }
-                                }
-                                Rectangle { height: 12px; }
-                                Rectangle { height: 1px; background: Theme.border; }
-                                Rectangle { height: 12px; }
-                                VerticalLayout {
-                                    spacing: 6px;
-                                    HorizontalLayout {
-                                        FieldLabel { text: "Opacity"; horizontal-stretch: 1; }
-                                        FieldLabel { text: round(root.overlay-opacity * 100) + "%"; }
-                                    }
-                                    SliderBar { minimum: 0.2; maximum: 1.0; value <=> root.overlay-opacity; changed(v) => { root.opacity-changed(v); } }
                                 }
                                 Rectangle { height: 10px; }
-                                VerticalLayout {
+
+                                if root.overlay-settings-tab == 0: VerticalLayout {
                                     spacing: 6px;
-                                    HorizontalLayout {
-                                        FieldLabel { text: "Map overlay radius"; horizontal-stretch: 1; }
-                                        FieldLabel { text: round(root.overlay-radius) + " m"; }
+                                    SwitchRow { text: "Lock, click through"; shortcut: "Ctrl L"; checked <=> root.overlays-locked; toggled(on) => { root.lock-changed(on); } }
+                                    Rectangle { height: 10px; }
+                                    VerticalLayout {
+                                        spacing: 6px;
+                                        HorizontalLayout {
+                                            FieldLabel { text: "Opacity"; horizontal-stretch: 1; }
+                                            FieldLabel { text: round(root.overlay-opacity * 100) + "%"; }
+                                        }
+                                        SliderBar { minimum: 0.2; maximum: 1.0; value <=> root.overlay-opacity; changed(v) => { root.opacity-changed(v); } }
                                     }
-                                    SliderBar { minimum: 25; maximum: 1000; value <=> root.overlay-radius; changed(v) => { root.overlay-radius-changed(v); } }
+                                }
+
+                                if root.overlay-settings-tab == 1: VerticalLayout {
+                                    spacing: 6px;
+                                    SwitchRow { text: "Meter overlays"; shortcut: "Ctrl O"; checked <=> root.meter-overlay; toggled(on) => { root.meter-overlay-changed(on); } }
+                                    Rectangle { height: 10px; }
+                                    Rectangle { height: 1px; background: Theme.border; }
+                                    Rectangle { height: 10px; }
+                                    for cfg in root.overlay-configs: VerticalLayout {
+                                        spacing: 8px;
+                                        padding-bottom: 14px;
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            height: 30px;
+                                            Text { text: "Meter overlay " + cfg.id; color: #d0cfdd; font-size: 13px; vertical-alignment: center; }
+                                            Rectangle { horizontal-stretch: 1; }
+                                            IconButton {
+                                                y: (parent.height - self.height) / 2;
+                                                width: 28px;
+                                                height: 28px;
+                                                icon-size: 15px;
+                                                icon: Icons.x;
+                                                clicked => { root.overlay-remove(cfg.id); }
+                                            }
+                                            Toggle {
+                                                y: (parent.height - self.height) / 2;
+                                                checked: cfg.enabled;
+                                                toggled(on) => { root.overlay-changed({ id: cfg.id, enabled: on, metric: cfg.metric, range: cfg.range, scope: cfg.scope }); }
+                                            }
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 6px;
+                                            Dropdown {
+                                                horizontal-stretch: 1;
+                                                model: ["Damage", "Healing"];
+                                                current-index: cfg.metric;
+                                                selected(i) => { root.overlay-changed({ id: cfg.id, enabled: cfg.enabled, metric: i, range: cfg.range, scope: cfg.scope }); }
+                                            }
+                                            Dropdown {
+                                                horizontal-stretch: 1;
+                                                model: ["Fight", "Total"];
+                                                current-index: cfg.range;
+                                                selected(i) => { root.overlay-changed({ id: cfg.id, enabled: cfg.enabled, metric: cfg.metric, range: i, scope: cfg.scope }); }
+                                            }
+                                            Dropdown {
+                                                horizontal-stretch: 1;
+                                                model: ["All", "Group", "Me"];
+                                                current-index: cfg.scope;
+                                                selected(i) => { root.overlay-changed({ id: cfg.id, enabled: cfg.enabled, metric: cfg.metric, range: cfg.range, scope: i }); }
+                                            }
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        alignment: start;
+                                        TextButton { icon: Icons.plus; text: "Add meter overlay"; clicked => { root.overlay-add(); } }
+                                    }
+                                }
+
+                                if root.overlay-settings-tab == 2: VerticalLayout {
+                                    spacing: 6px;
+                                    SwitchRow { text: "Map overlay"; shortcut: "Ctrl M"; checked <=> root.map-overlay; toggled(on) => { root.map-overlay-changed(on); } }
+                                    Rectangle { height: 10px; }
+                                    VerticalLayout {
+                                        spacing: 6px;
+                                        HorizontalLayout {
+                                            FieldLabel { text: "Map overlay radius"; horizontal-stretch: 1; }
+                                            FieldLabel { text: round(root.overlay-radius) + " m"; }
+                                        }
+                                        SliderBar { minimum: 25; maximum: 1000; value <=> root.overlay-radius; changed(v) => { root.overlay-radius-changed(v); } }
+                                    }
+                                }
+
+                                if root.overlay-settings-tab == 3: VerticalLayout {
+                                    spacing: 6px;
+                                    SwitchRow { text: "Pet overlay"; shortcut: "Ctrl P"; checked <=> root.pet-overlay; toggled(on) => { root.pet-overlay-changed(on); } }
+                                    SwitchRow { text: "Add the pet of the monster you fight"; checked <=> root.pet-overlay-target; toggled(on) => { root.pet-overlay-target-changed(on); } }
+                                    SwitchRow { text: "Sync pinned pets with the monsters ticked on the map"; checked <=> root.pet-auto-pin; toggled(on) => { root.pet-auto-pin-changed(on); } }
                                 }
                             }
                         }
@@ -3089,8 +3149,8 @@ export component App inherits Window {
     if root.sound-panel-open: Rectangle {
         x: min(root.sound-anchor.x + 30px - self.width, root.width - self.width - 8px);
         y: root.sound-anchor.y + 36px;
-        width: 248px;
-        height: 104px;
+        width: 268px;
+        height: 148px;
         background: Theme.surface;
         border-radius: 10px;
         border-width: 1px;
@@ -3101,6 +3161,7 @@ export component App inherits Window {
         VerticalLayout {
             padding: 12px;
             spacing: 12px;
+            SwitchRow { text: "Sound near a Hidden Cube"; height: 28px; checked <=> root.cube-sound; toggled(on) => { root.cube-sound-changed(on); } }
             HorizontalLayout {
                 spacing: 8px;
                 Icon {
