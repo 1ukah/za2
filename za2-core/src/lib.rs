@@ -14,6 +14,7 @@ pub mod ping;
 pub mod position;
 pub mod protocol;
 pub mod reassembler;
+pub mod schedule;
 pub mod recording;
 pub mod segment;
 pub mod sessions;

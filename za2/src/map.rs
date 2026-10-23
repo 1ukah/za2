@@ -244,15 +244,15 @@ pub fn gather_color(kind: &str) -> (u8, u8, u8) {
 
 pub fn kind_label(kind: &str) -> &'static str {
     match kind {
-        "Od" => "Odyle (Od)",
-        "Herb" => "Herbs and plants",
+        "Od" => "Odyle",
+        "Herb" => "Herbs",
         "Food" => "Food",
         "Ore" => "Ore",
         "Wood" => "Wood",
         "Cotton" => "Cotton",
         "Gemstone" => "Gemstones",
         "Fragment" => "Empyrean Traces",
-        "Cube" => "Hidden Cubes (static places)",
+        "Cube" => "Hidden Cubes",
         _ => "Other",
     }
 }
@@ -270,6 +270,8 @@ pub struct Marker {
     pub icon: Option<&'static str>,
     /// A monster without a portrait: the monster glyph in a ring of `color` instead of the dot.
     pub glyph: bool,
+    /// The name shown under the marker (gathering spots, where one icon stands for several resources).
+    pub name: Option<&'static str>,
 }
 
 /// How big a kind of marker is drawn: `base` pixels across at `MARKER_REF_RADIUS`, growing when zoomed in and shrinking
@@ -340,8 +342,9 @@ const CUBE_GROUP_RANGE: f32 = 500.0;
 #[derive(Default)]
 pub struct StaticLayer {
     key: String,
-    /// Gathering places with their marker colour (Hidden Cubes in the colour of their group).
-    pub gather: Vec<(&'static GatherItem, f32, f32, (u8, u8, u8))>,
+    /// Gathering places with their marker colour (Hidden Cubes in the colour of their group), and whether the place is
+    /// inside an area (which carries the name, so the marker does not).
+    pub gather: Vec<(&'static GatherItem, f32, f32, (u8, u8, u8), bool)>,
     /// Every Hidden Cube place of the map with its group colour, for colouring live cubes.
     cube_places: Vec<(f32, f32, (u8, u8, u8))>,
     /// Spawn places of the selected monsters.
@@ -468,15 +471,18 @@ fn rounded_outline(points: &[(f32, f32)]) -> Vec<(f32, f32)> {
     convex_hull(ring)
 }
 
+/// Gathering places of one resource this many or more close together are drawn as an area.
+const GATHER_AREA_MIN: usize = 3;
+
+/// The area around one group of places.
+fn area(label: &str, color: (u8, u8, u8), cluster: &[(f32, f32)]) -> Area {
+    let outline = rounded_outline(cluster);
+    let bounds = outline.iter().fold((f32::MAX, f32::MAX, f32::MIN, f32::MIN), |b, &(x, y)| (b.0.min(x), b.1.min(y), b.2.max(x), b.3.max(y)));
+    Area { label: label.to_string(), color, outline, bounds }
+}
+
 pub fn spawn_areas(label: &str, color: (u8, u8, u8), points: &[(f32, f32)]) -> Vec<Area> {
-    spawn_clusters(points)
-        .into_iter()
-        .map(|cluster| {
-            let outline = rounded_outline(&cluster);
-            let bounds = outline.iter().fold((f32::MAX, f32::MAX, f32::MIN, f32::MIN), |b, &(x, y)| (b.0.min(x), b.1.min(y), b.2.max(x), b.3.max(y)));
-            Area { label: label.to_string(), color, outline, bounds }
-        })
-        .collect()
+    spawn_clusters(points).into_iter().map(|cluster| area(label, color, &cluster)).collect()
 }
 
 /// The icon of a monster: its portrait, else the portrait of its pet (none: drawn as the monster glyph).
@@ -524,11 +530,23 @@ impl StaticLayer {
         }
         for item in gather::data().items.iter().filter(|i| gather_keys.contains(&i.key) && i.is_for(faction)) {
             if item.kind == "Cube" && !self.cube_places.is_empty() {
-                self.gather.extend(self.cube_places.iter().map(|&(x, y, color)| (item, x, y, color)));
+                self.gather.extend(self.cube_places.iter().map(|&(x, y, color)| (item, x, y, color, false)));
                 continue;
             }
-            for &(x, y) in gather::points_of(&map.table, &item.key) {
-                self.gather.push((item, x, y, gather_color(&item.kind)));
+            let color = gather_color(&item.kind);
+            let points = gather::points_of(&map.table, &item.key);
+            // Odyle and Hidden Cubes have an icon of their own; the other resources share one per kind, so places close
+            // together become an area with the resource's name, like the monsters' spawn areas
+            if matches!(item.kind.as_str(), "Od" | "Cube") {
+                self.gather.extend(points.iter().map(|&(x, y)| (item, x, y, color, false)));
+                continue;
+            }
+            for cluster in spawn_clusters(points) {
+                let in_area = cluster.len() >= GATHER_AREA_MIN;
+                if in_area {
+                    self.areas.push(area(item.name_in("en"), color, &cluster));
+                }
+                self.gather.extend(cluster.into_iter().map(|(x, y)| (item, x, y, color, in_area)));
             }
         }
         for group in monster_groups(&map.table, pet_ids, monster_ids) {
@@ -773,7 +791,7 @@ pub fn boss_marker(map: &MapInfo, view: &View, npc: i32, x: f32, y: f32, color: 
     }
     let (sx, sy) = view.to_screen(map, x as f64, y as f64);
     let icon = monster_icon(npc);
-    Some(Marker { x: sx as f32, y: sy as f32, color, size: BOSS_ICON.at(view.radius_metres), live: true, level: 0, icon, glyph: icon.is_none() })
+    Some(Marker { x: sx as f32, y: sy as f32, color, size: BOSS_ICON.at(view.radius_metres), live: true, level: 0, icon, glyph: icon.is_none(), name: None })
 }
 
 pub struct LiveInputs<'a> {
@@ -801,9 +819,9 @@ pub fn markers(map: &MapInfo, view: &View, layer: &StaticLayer, live: &LiveInput
     let static_dot = STATIC_DOT.at(radius);
     // `glyph`: a monster, drawn as the monster glyph when it has no icon
     let static_marker = |x: f32, y: f32, color, icon: Option<&'static str>, glyph: bool| match (icon, glyph) {
-        _ if !static_icons => Marker { x, y, color, size: static_dot, live: false, level: 0, icon: None, glyph: false },
-        (None, false) => Marker { x, y, color, size: static_dot, live: false, level: 0, icon: None, glyph: false },
-        _ => Marker { x, y, color, size: STATIC_ICON.at(radius), live: false, level: 0, icon, glyph: icon.is_none() },
+        _ if !static_icons => Marker { x, y, color, size: static_dot, live: false, level: 0, icon: None, glyph: false, name: None },
+        (None, false) => Marker { x, y, color, size: static_dot, live: false, level: 0, icon: None, glyph: false, name: None },
+        _ => Marker { x, y, color, size: STATIC_ICON.at(radius), live: false, level: 0, icon, glyph: icon.is_none(), name: None },
     };
     let live_marker = |x: f32, y: f32, color, level: i32, icon: Option<&'static str>, glyph: bool| Marker {
         x,
@@ -814,7 +832,10 @@ pub fn markers(map: &MapInfo, view: &View, layer: &StaticLayer, live: &LiveInput
         level,
         icon,
         glyph: glyph && icon.is_none(),
+        name: None,
     };
+    // the name of a gathering spot, while the icons are shown; Odyle and Hidden Cubes have an icon of their own
+    let name_of = |item: Option<&'static GatherItem>| item.filter(|i| static_icons && !matches!(i.kind.as_str(), "Od" | "Cube")).map(|i| i.name_in("en"));
 
     let push = |m: Marker, out: &mut Vec<Marker>| {
         if out.len() < MAX_MARKERS {
@@ -830,14 +851,15 @@ pub fn markers(map: &MapInfo, view: &View, layer: &StaticLayer, live: &LiveInput
         }
     }
 
-    for &(item, x, y, color) in &layer.gather {
+    for &(item, x, y, color, in_area) in &layer.gather {
         if !in_view(x, y) {
             continue;
         }
         if near_player(x, y) && !live_env_matches(&item.key, x, y) {
             continue;
         }
-        push(static_marker(x, y, color, map_icons::gather(&item.kind), false), out);
+        let name = if in_area { None } else { name_of(Some(item)) };
+        push(Marker { name, ..static_marker(x, y, color, map_icons::gather(&item.kind), false) }, out);
     }
 
     if live.known {
@@ -845,7 +867,8 @@ pub fn markers(map: &MapInfo, view: &View, layer: &StaticLayer, live: &LiveInput
             let wanted = if e.kind == "Cube" { live.show_cubes } else { layer.gather.iter().any(|g| g.0.key == e.key) };
             if wanted && in_view(e.x, e.y) {
                 let color = if e.kind == "Cube" { layer.cube_color_near(e.x, e.y).unwrap_or_else(|| gather_color("Cube")) } else { gather_color(&e.kind) };
-                push(live_marker(e.x, e.y, color, level_of(e.z, live.player_z), map_icons::gather(&e.kind), false), out);
+                let marker = live_marker(e.x, e.y, color, level_of(e.z, live.player_z), map_icons::gather(&e.kind), false);
+                push(Marker { name: name_of(gather::item(&e.key)), ..marker }, out);
             }
         }
         for &LiveMob { npc, x, y, .. } in live.mobs {
@@ -863,6 +886,39 @@ pub fn markers(map: &MapInfo, view: &View, layer: &StaticLayer, live: &LiveInput
             }
         }
     }
+}
+
+/// Most marker names shown at once: each one is a UI element.
+const MAX_NAMES: usize = 200;
+
+/// A name under a marker, centred on (x, y) (screen, logical pixels).
+pub struct MarkerName {
+    pub x: f32,
+    pub y: f32,
+    pub text: &'static str,
+    pub color: (u8, u8, u8),
+}
+
+/// The names of the markers that carry one, live ones first; a name that would cover one already placed is left out.
+pub fn marker_names(markers: &[Marker]) -> Vec<MarkerName> {
+    let mut boxes: Vec<(f32, f32, f32, f32)> = Vec::new();
+    let mut out = Vec::new();
+    for m in markers.iter().filter(|m| m.live).chain(markers.iter().filter(|m| !m.live)) {
+        let Some(text) = m.name else { continue };
+        let y = m.y + m.size / 2.0;
+        // about the size of the chip the UI draws (11px bold text, 5px padding, 18px high, 2px below)
+        let half = text.chars().count() as f32 * 3.3 + 5.0;
+        let b = (m.x - half, y, m.x + half, y + 22.0);
+        if boxes.iter().any(|o| b.0 < o.2 && o.0 < b.2 && b.1 < o.3 && o.1 < b.3) {
+            continue;
+        }
+        boxes.push(b);
+        out.push(MarkerName { x: m.x, y, text, color: m.color });
+        if out.len() >= MAX_NAMES {
+            break;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -909,6 +965,14 @@ mod tests {
     }
 
     #[test]
+    fn close_gathering_places_become_named_areas() {
+        let mut layer = StaticLayer::default();
+        layer.update(Some(altgard()), &BTreeSet::from(["Ruby".to_string()]), &BTreeSet::new(), &BTreeSet::new(), None);
+        assert!(!layer.areas.is_empty() && layer.areas.iter().all(|a| a.label == "Ruby"));
+        assert!(layer.gather.iter().filter(|g| g.4).count() >= GATHER_AREA_MIN, "the places in an area lose their own name");
+    }
+
+    #[test]
     fn level_arrows_need_both_heights() {
         assert_eq!(level_of(27_000.0, Some(26_000.0)), 1);
         assert_eq!(level_of(25_000.0, Some(26_000.0)), -1);
@@ -950,8 +1014,8 @@ mod tests {
     fn the_layer_shows_markers_and_areas() {
         let mut painter = LayerPainter::default();
         let markers = [
-            Marker { x: 20.0, y: 20.0, color: (255, 0, 0), size: 20.0, live: true, level: 1, icon: None, glyph: true },
-            Marker { x: 60.0, y: 20.0, color: (0, 255, 0), size: 10.0, live: false, level: 0, icon: None, glyph: false },
+            Marker { x: 20.0, y: 20.0, color: (255, 0, 0), size: 20.0, live: true, level: 1, icon: None, glyph: true, name: None },
+            Marker { x: 60.0, y: 20.0, color: (0, 255, 0), size: 10.0, live: false, level: 0, icon: None, glyph: false, name: None },
         ];
         let areas = [ScreenArea { outline: vec![(10.0, 50.0), (90.0, 50.0), (50.0, 90.0)], color: (0, 0, 255), label: "x".into(), label_at: (50.0, 90.0) }];
         let image = painter.paint(100.0, 100.0, 2.0, &markers, &areas);

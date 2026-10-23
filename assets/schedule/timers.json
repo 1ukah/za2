@@ -1,0 +1,19 @@
+{
+  "region": "South America",
+  "clock": "São Paulo",
+  "utcOffsetMinutes": -180,
+  "sources": [
+    "https://github.com/xCROv/aion2-nyerk app/src/shared/timers.ts",
+    "https://github.com/Gabriel-Antunes-cbio/DiarioDaeva daeva/schedule.py",
+    "https://shugo.gg/timers",
+    "https://metabot.gg/en/aion-2/events"
+  ],
+  "events": [
+    { "id": "daily_reset", "name": "Daily reset", "kind": "reset", "rule": { "type": "daily", "at": "04:00" } },
+    { "id": "weekly_reset", "name": "Weekly reset", "kind": "reset", "rule": { "type": "weekly", "days": [3], "at": "04:00" } },
+    { "id": "shugo_festival", "name": "Shugo Festival", "kind": "event", "rule": { "type": "hourly", "minute": 0, "minutes": 10 } },
+    { "id": "dimensional_invasion", "name": "Dimensional Invasion", "kind": "event", "note": "Beritra Air Raid, Accursed Sword or Incursion of the Spirits", "rule": { "type": "hourly", "minute": 30, "minutes": 13 } },
+    { "id": "spacetime_rift", "name": "Spacetime Rift", "kind": "event", "verified": false, "rule": { "type": "every", "hours": 3, "from": "02:00", "minutes": 10 } },
+    { "id": "black_cloud_merchant", "name": "Black Cloud Merchant restock", "kind": "event", "rule": { "type": "hourly", "minute": 0 } }
+  ]
+}

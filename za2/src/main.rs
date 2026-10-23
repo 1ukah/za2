@@ -6,6 +6,7 @@ mod map;
 mod memory;
 mod pet_tracker;
 mod settings;
+mod timers;
 mod worker;
 
 use std::cell::{Cell, RefCell};
@@ -38,6 +39,7 @@ slint::include_modules!();
 const SETTINGS_TAB: i32 = -1;
 const PETS_TAB: i32 = 3;
 const PROFILE_TAB: i32 = 4;
+const TIMERS_TAB: i32 = 5;
 
 struct Args {
     replay: Option<PathBuf>,
@@ -78,6 +80,7 @@ fn parse_args() -> Args {
                     Some("settings") => SETTINGS_TAB,
                     Some("pets") => PETS_TAB,
                     Some("profile") => PROFILE_TAB,
+                    Some("timers") => TIMERS_TAB,
                     _ => usage(),
                 }
             }
@@ -206,6 +209,8 @@ struct Models {
     /// The names and return times of the shown field bosses, on the map and on the map overlay.
     boss_labels: Rc<VecModel<MapLabel>>,
     overlay_boss_labels: Rc<VecModel<MapLabel>>,
+    /// The shown field bosses out of view, pinned in a corner of the map.
+    boss_pins: Rc<VecModel<BossPin>>,
 }
 
 impl Models {
@@ -219,6 +224,7 @@ impl Models {
             boss_rows: Rc::new(VecModel::default()),
             boss_labels: Rc::new(VecModel::default()),
             overlay_boss_labels: Rc::new(VecModel::default()),
+            boss_pins: Rc::new(VecModel::default()),
         };
         app.set_rows(ModelRc::from(models.rows.clone()));
         app.set_pet_rows(ModelRc::from(models.pet_rows.clone()));
@@ -227,6 +233,7 @@ impl Models {
         app.set_chart_marks(ModelRc::from(models.chart_marks.clone()));
         app.set_boss_rows(ModelRc::from(models.boss_rows.clone()));
         app.set_boss_labels(ModelRc::from(models.boss_labels.clone()));
+        app.set_boss_pins(ModelRc::from(models.boss_pins.clone()));
         models
     }
 }
@@ -581,9 +588,9 @@ fn to_tiles(quads: Vec<map::TileQuad>) -> ModelRc<MapTile> {
     ModelRc::new(VecModel::from(tiles))
 }
 
-/// The names of the spawn areas that are big enough on the screen to carry one.
-fn to_labels(areas: &[map::ScreenArea]) -> ModelRc<MapLabel> {
-    let list: Vec<MapLabel> = areas
+/// The names of the spawn areas that are big enough on the screen to carry one, and of the gathering spots.
+fn to_labels(areas: &[map::ScreenArea], markers: &[Marker]) -> ModelRc<MapLabel> {
+    let mut list: Vec<MapLabel> = areas
         .iter()
         .filter(|a| {
             let (x0, x1) = a.outline.iter().fold((f32::MAX, f32::MIN), |b, p| (b.0.min(p.0), b.1.max(p.0)));
@@ -591,6 +598,7 @@ fn to_labels(areas: &[map::ScreenArea]) -> ModelRc<MapLabel> {
         })
         .map(|a| MapLabel { x: a.label_at.0, y: a.label_at.1, text: a.label.clone().into(), color: rgb(a.color) })
         .collect();
+    list.extend(map::marker_names(markers).into_iter().map(|n| MapLabel { x: n.x, y: n.y, text: n.text.into(), color: rgb(n.color) }));
     ModelRc::new(VecModel::from(list))
 }
 
@@ -935,6 +943,39 @@ fn boss_marks(ui: &Ui, map: &MapInfo, view: &View) -> (Vec<Marker>, u64, Vec<Map
     (markers, hash.finish(), labels)
 }
 
+/// Most field bosses pinned at once, the soonest back first.
+const MAX_BOSS_PINS: usize = 6;
+
+/// The shown field bosses whose marker is not on the map (out of view, or on another map) as cards, the ones up first,
+/// then by return.
+fn boss_pins(ui: &Ui, map: &MapInfo, view: &View) -> Vec<BossPin> {
+    if !ui.settings.boss_pins {
+        return Vec::new();
+    }
+    let now_ms = ui.snapshot.now / 1000;
+    let mut pins: Vec<(i64, BossPin)> = za2_core::catalog::field_bosses::all()
+        .iter()
+        .filter(|b| ui.settings.shown_bosses.contains(&b.world_id))
+        .filter(|b| !map.table.ends_with(&format!("/{}", b.map_key)) || map::boss_marker(map, view, b.npc, b.x, b.y, (0, 0, 0)).is_none())
+        .map(|b| {
+            let (status, color, order, _) = boss_status(&ui.snapshot.field_bosses, b, now_ms);
+            let icon = map::monster_icon(b.npc);
+            let pin = BossPin {
+                icon: icon.map(icons::load).unwrap_or_default(),
+                glyph: icon.is_none(),
+                name: b.name.clone().into(),
+                status: status.into(),
+                detail: b.map_name.clone().into(),
+                color,
+                world_id: b.world_id as i32,
+            };
+            (order, pin)
+        })
+        .collect();
+    pins.sort_by_key(|p| p.0);
+    pins.into_iter().take(MAX_BOSS_PINS).map(|p| p.1).collect()
+}
+
 /// The Profile tab: what is known of the own character, its pets and the connection.
 fn apply_profile(app: &App, ui: &mut Ui) {
     let s = &ui.snapshot;
@@ -1018,6 +1059,18 @@ fn apply_profile(app: &App, ui: &mut Ui) {
 }
 
 /// "1:23:45" for an hour or more, else "23:45".
+/// The wall clock in unix milliseconds.
+fn wall_clock_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+}
+
+/// The Timers page, by the wall clock (the timetable is not the capture's).
+fn apply_timers(app: &App) {
+    let now = wall_clock_ms();
+    app.set_timer_rows(ModelRc::new(VecModel::from(timers::rows(now))));
+    app.set_timer_clock(timers::clock(now).into());
+}
+
 fn duration_text_long(seconds: f64) -> String {
     let s = seconds.max(0.0) as u64;
     if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { duration_text(s as f64) }
@@ -1524,6 +1577,7 @@ fn apply_map(app: &App, ui: &mut Ui, force: bool) {
     };
     let (bosses, bosses_key, boss_labels) = boss_marks(ui, map, &view);
     sync_model(&ui.models.boss_labels, boss_labels);
+    sync_model(&ui.models.boss_pins, boss_pins(ui, map, &view));
     let key = (
         map.key.clone(),
         (ui.map.center.0.round() as i64, ui.map.center.1.round() as i64),
@@ -1543,7 +1597,7 @@ fn apply_map(app: &App, ui: &mut Ui, force: bool) {
         let scale = app.window().scale_factor();
         app.set_tiles(to_tiles(quads));
         app.set_layer(ui.painter.paint(width, height, scale, &ui.map.markers, &areas));
-        app.set_labels(to_labels(&areas));
+        app.set_labels(to_labels(&areas, &ui.map.markers));
     }
 
     match position.as_ref().filter(|_| tracked_here) {
@@ -1647,7 +1701,7 @@ fn apply_map_overlay(overlay: &MapOverlay, ui: &mut Ui, force: bool) {
         let scale = overlay.window().scale_factor();
         overlay.set_tiles(to_tiles(quads));
         overlay.set_layer(ui.painter.paint(width, height, scale, &markers, &areas));
-        overlay.set_labels(to_labels(&areas));
+        overlay.set_labels(to_labels(&areas, &markers));
     }
     let (me_x, me_y) = view.to_screen(map, p.x as f64, p.y as f64);
     overlay.set_me_visible(p.state != PositionState::Unknown);
@@ -1914,6 +1968,7 @@ fn main() {
         std::iter::once("All types".to_string()).chain(pet_species()).map(SharedString::from).collect::<Vec<_>>(),
     )));
     app.set_sidebar_width(settings.sidebar_width.clamp(240.0, 900.0));
+    app.set_boss_pins_on(settings.boss_pins);
     map_overlay.set_locked(settings.overlays_locked);
     map_overlay.set_overlay_opacity(settings.overlay_opacity);
     apply_filters(&app, &ui.borrow());
@@ -2632,6 +2687,33 @@ fn main() {
     }
     {
         let ui = ui.clone();
+        let weak = app.as_weak();
+        app.on_boss_pins_changed(move |on| {
+            let mut u = ui.borrow_mut();
+            u.settings.boss_pins = on;
+            u.settings.save();
+            apply_map(&weak.unwrap(), &mut u, false);
+        });
+    }
+    {
+        let ui = ui.clone();
+        let weak = app.as_weak();
+        // a pinned card finds its boss: on its own map, if that is another one
+        app.on_focus_pinned_boss(move |world_id| {
+            let app = weak.unwrap();
+            let mut u = ui.borrow_mut();
+            let Some(b) = za2_core::catalog::field_bosses::all().iter().find(|b| b.world_id as i32 == world_id) else { return };
+            let Some(map) = maps::all().iter().find(|m| m.table.ends_with(&format!("/{}", b.map_key))) else { return };
+            u.map.manual = Some(map);
+            u.map.follow = false;
+            u.map.center = (b.x as f64, b.y as f64);
+            app.set_follow(false);
+            apply_bosses(&app, &u);
+            apply_map(&app, &mut u, true);
+        });
+    }
+    {
+        let ui = ui.clone();
         app.on_sidebar_width_changed(move |width| {
             let mut u = ui.borrow_mut();
             u.settings.sidebar_width = width;
@@ -2714,6 +2796,7 @@ fn main() {
         let mut filters_for: Option<String> = None;
         let mut learned_saved = false;
         let mut size_check = Instant::now();
+        let mut timers_second = 0;
         timer.start(slint::TimerMode::Repeated, Duration::from_millis(100), move || {
             let (app, mapo) = (weak.unwrap(), mapo.unwrap());
             let mut u = ui.borrow_mut();
@@ -2726,6 +2809,13 @@ fn main() {
             if u.sound_test.is_some_and(|at| at.elapsed() >= Duration::from_secs(1)) {
                 u.sound_test = Some(Instant::now());
                 play_cube_sound(&u.settings);
+            }
+            if app.get_tab() == TIMERS_TAB {
+                let second = wall_clock_ms() / 1000;
+                if timers_second != second {
+                    timers_second = second;
+                    apply_timers(&app);
+                }
             }
             let version = u.shared.version.load(Ordering::Acquire);
             let fresh = version != u.seen_version;

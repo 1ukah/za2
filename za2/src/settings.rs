@@ -65,6 +65,8 @@ pub struct Settings {
     pub pet_auto_pin: bool,
     /// Field bosses shown on the map (world-map ids).
     pub shown_bosses: BTreeSet<u32>,
+    /// Shown field bosses out of view are pinned as cards in a corner of the map.
+    pub boss_pins: bool,
     /// Width (logical pixels) of the list beside the map.
     pub sidebar_width: f32,
 }
@@ -102,6 +104,7 @@ impl Default for Settings {
             pet_overlay_target: true,
             pet_auto_pin: true,
             shown_bosses: BTreeSet::new(),
+            boss_pins: true,
             sidebar_width: 300.0,
         }
     }
