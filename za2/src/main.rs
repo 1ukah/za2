@@ -338,6 +338,7 @@ fn sync_overlays(app: &App, ui: &mut Ui) {
         let Some(cfg) = configs.iter().find(|c| c.id == o.id) else { continue };
         o.window.set_locked(locked);
         o.window.set_overlay_opacity(opacity);
+        o.window.set_minimal(ui.settings.meter_overlay_minimal);
         let visible = all_on && cfg.enabled;
         if visible && !o.shown {
             o.shown = true;
@@ -416,12 +417,19 @@ fn apply_overlay(o: &OverlayWindow, cfg: &settings::OverlayConfig, ui: &Ui) {
     }
 }
 
-/// How many players fit in an overlay: its height less the header, footer and padding, 24px + 4px per row. With a player's
-/// skills open, at most 5 rows stay so the skills have room.
+/// How many players fit in an overlay: its height less the header, footer and padding, 24px + 4px per row (minimal: 18px +
+/// 2px). With a player's skills open, at most 5 rows stay so the skills have room.
 fn overlay_row_capacity(o: &OverlayWindow) -> usize {
     let height = logical_size(o.window.window()).1;
-    let footer = if o.window.get_ttk_text().is_empty() && o.window.get_ping_text().is_empty() { 0.0 } else { 16.0 + 4.0 };
-    let fit = (((height - 8.0 * 2.0 - 20.0 - footer) / 28.0).floor() as usize).max(1);
+    let no_footer = o.window.get_ttk_text().is_empty() && o.window.get_ping_text().is_empty();
+    let fit = if o.window.get_minimal() {
+        let footer = if no_footer { 0.0 } else { 14.0 + 2.0 };
+        (height - 4.0 * 2.0 - 16.0 - footer) / 20.0
+    } else {
+        let footer = if no_footer { 0.0 } else { 16.0 + 4.0 };
+        (height - 8.0 * 2.0 - 20.0 - footer) / 28.0
+    };
+    let fit = (fit.floor() as usize).max(1);
     if ui_selected(o) { fit.min(5) } else { fit }
 }
 
@@ -1227,8 +1235,11 @@ fn apply_pet_overlay(ui: &Ui) {
     let (_, source, _) = pet_source_text(s.pet_source);
     let o = &ui.pet_overlay;
     o.set_header(format!("Pets  ·  {source}").into());
-    let width = ui.settings.pet_overlay_size.map_or(340.0, |s| s.0);
-    let height = 8.0 * 2.0 + 20.0 + 4.0 + count.max(1) as f32 * 30.0;
+    let (width, height) = if ui.settings.pet_overlay_minimal {
+        (ui.settings.pet_overlay_size.map_or(260.0, |s| s.0), 4.0 * 2.0 + 16.0 + count.max(1) as f32 * 22.0)
+    } else {
+        (ui.settings.pet_overlay_size.map_or(340.0, |s| s.0), 8.0 * 2.0 + 20.0 + 4.0 + count.max(1) as f32 * 30.0)
+    };
     if logical_size(o.window()) != (width, height) {
         o.window().set_size(slint::LogicalSize::new(width, height));
     }
@@ -1898,6 +1909,7 @@ fn main() {
     pet_overlay.set_empty_text("Pin pets in the Pets tab of za2.".into());
     pet_overlay.set_locked(settings.overlays_locked);
     pet_overlay.set_overlay_opacity(settings.overlay_opacity);
+    pet_overlay.set_minimal(settings.pet_overlay_minimal);
 
     let start_map = settings.last_map.as_deref().and_then(maps::by_key).unwrap_or_else(|| &maps::all()[0]);
     let center = match (settings.last_x, settings.last_y) {
@@ -1963,6 +1975,8 @@ fn main() {
     app.set_meter_range(settings.meter_range as i32);
     app.set_pet_overlay(settings.pet_overlay);
     app.set_pet_overlay_target(settings.pet_overlay_target);
+    app.set_pet_overlay_minimal(settings.pet_overlay_minimal);
+    app.set_meter_overlay_minimal(settings.meter_overlay_minimal);
     app.set_pet_auto_pin(settings.pet_auto_pin);
     app.set_pet_species_names(ModelRc::new(VecModel::from(
         std::iter::once("All types".to_string()).chain(pet_species()).map(SharedString::from).collect::<Vec<_>>(),
@@ -2718,6 +2732,28 @@ fn main() {
             let mut u = ui.borrow_mut();
             u.settings.sidebar_width = width;
             u.settings.save();
+        });
+    }
+    {
+        let ui = ui.clone();
+        app.on_pet_overlay_minimal_changed(move |on| {
+            let mut u = ui.borrow_mut();
+            u.settings.pet_overlay_minimal = on;
+            u.settings.save();
+            u.pet_overlay.set_minimal(on);
+            apply_pet_overlay(&u);
+        });
+    }
+    {
+        let ui = ui.clone();
+        let weak = app.as_weak();
+        app.on_meter_overlay_minimal_changed(move |on| {
+            let app = weak.unwrap();
+            let mut u = ui.borrow_mut();
+            u.settings.meter_overlay_minimal = on;
+            u.settings.save();
+            sync_overlays(&app, &mut u);
+            apply_meter(&app, &u);
         });
     }
     {

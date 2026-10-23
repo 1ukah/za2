@@ -43,6 +43,8 @@ pub struct Settings {
     /// Shows the meter overlays (each also has its own switch).
     pub meter_overlay: bool,
     pub overlays: Vec<OverlayConfig>,
+    /// The meter overlays use the minimal style: no background, smaller rows.
+    pub meter_overlay_minimal: bool,
     /// The meter table shows the current fight (0) or the total (1).
     pub meter_range: u8,
     pub map_overlay: bool,
@@ -61,6 +63,8 @@ pub struct Settings {
     pub pet_overlay_size: Option<(f32, f32)>,
     /// The pet overlay also shows the pet of the monster the player fights.
     pub pet_overlay_target: bool,
+    /// The pet overlay uses the minimal style: no background, header or remaining kills.
+    pub pet_overlay_minimal: bool,
     /// The pinned pets follow the map: ticking a pet or its monster pins the pet, pinning ticks it, and the other way round.
     pub pet_auto_pin: bool,
     /// Field bosses shown on the map (world-map ids).
@@ -89,6 +93,7 @@ impl Default for Settings {
             last_y: None,
             meter_overlay: false,
             overlays: vec![OverlayConfig::default()],
+            meter_overlay_minimal: false,
             meter_range: 0,
             map_overlay: false,
             map_overlay_size: None,
@@ -102,6 +107,7 @@ impl Default for Settings {
             pet_overlay: false,
             pet_overlay_size: None,
             pet_overlay_target: true,
+            pet_overlay_minimal: false,
             pet_auto_pin: true,
             shown_bosses: BTreeSet::new(),
             boss_pins: true,

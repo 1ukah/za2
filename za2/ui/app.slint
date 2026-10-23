@@ -1301,6 +1301,100 @@ component OverlayRowBar inherits Rectangle {
     }
 }
 
+// Text that stays legible on the game without a background: a dark outline around the glyphs.
+component HudText inherits Text {
+    stroke: #000000c8;
+    stroke-width: 2.5px;
+    stroke-style: outside;
+    vertical-alignment: center;
+}
+
+// The frame of a minimal overlay: nothing when locked; when unlocked a faint backdrop and outline show where it can be
+// dragged and resized.
+component HudFrame inherits Rectangle {
+    in property <bool> locked;
+    in property <float> overlay-opacity;
+    border-radius: 6px;
+    background: root.locked ? transparent : #000000.with-alpha(0.35 * root.overlay-opacity);
+    border-width: root.locked ? 0px : 1px;
+    border-color: Theme.accent.with-alpha(0.45);
+}
+
+// The small lock toggle of a minimal overlay.
+component HudLockButton inherits Rectangle {
+    callback clicked;
+    width: 18px;
+    height: 16px;
+    border-radius: 4px;
+    background: touch.has-hover ? #ffffff26 : transparent;
+    Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 12px;
+        height: 12px;
+        commands: Icons.lock-open;
+        tint: touch.has-hover ? Theme.text : Theme.accent;
+        stroke-width: 2px;
+    }
+    touch := TouchArea { clicked => { root.clicked(); } }
+}
+
+// A player in a minimal meter overlay: no row background, a thin share line under the text.
+component HudOverlayRow inherits Rectangle {
+    in property <OverlayRow> data;
+    in property <bool> selected;
+    in property <bool> clickable;
+    callback clicked;
+    callback drag();
+    height: 18px;
+    border-radius: 3px;
+    background: root.selected ? Theme.accent.with-alpha(0.22) : touch.has-hover ? #ffffff1a : transparent;
+    Rectangle {
+        x: 0;
+        y: parent.height - 2px;
+        width: parent.width;
+        height: 2px;
+        background: #00000059;
+    }
+    Rectangle {
+        x: 0;
+        y: parent.height - 2px;
+        width: parent.width * root.data.share;
+        height: 2px;
+        background: root.data.color.with-alpha(root.data.local ? 1.0 : 0.75);
+    }
+    touch := TouchArea {
+        enabled: root.clickable;
+        property <bool> moving;
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                self.moving = e.modifiers.control;
+                if (self.moving) { root.drag(); }
+            }
+        }
+        clicked => {
+            if (!self.moving) { root.clicked(); }
+        }
+    }
+    HorizontalLayout {
+        padding-left: 2px;
+        padding-right: 2px;
+        padding-bottom: 2px;
+        spacing: 5px;
+        ClassIcon { source: root.data.class-icon; size: 14px; }
+        HudText {
+            text: root.data.name;
+            color: root.data.local ? Theme.accent : Theme.text;
+            font-weight: root.data.local ? 700 : 500;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        HudText { text: root.data.value; color: #c4c5d2; horizontal-alignment: right; width: 42px; }
+        HudText { text: root.data.rate; color: Theme.text; font-weight: 700; horizontal-alignment: right; width: 42px; }
+        HudText { text: root.data.share-text; color: #c4c5d2; horizontal-alignment: right; width: 30px; }
+    }
+}
+
 // ---------------------------------------------------------------- pets
 
 // A pet's picture in a ring: lavender for the fought monster's pet, green at max.
@@ -1474,6 +1568,61 @@ component PetOverlayRow inherits Rectangle {
     }
 }
 
+// A pet in the minimal pet overlay: icon, name, level and progress, without a row background.
+component HudPetRow inherits Rectangle {
+    in property <PetRow> data;
+    height: 20px;
+    HorizontalLayout {
+        padding-left: 1px;
+        padding-right: 2px;
+        spacing: 6px;
+        PetIcon {
+            y: (parent.height - self.height) / 2;
+            size: 18px;
+            source: root.data.icon;
+            ring: root.data.target ? Theme.accent : root.data.max ? Theme.green : transparent;
+        }
+        HudText {
+            text: root.data.name;
+            color: root.data.target ? Theme.accent : Theme.text;
+            font-weight: root.data.target ? 700 : 500;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        HudText {
+            width: 26px;
+            text: root.data.level > 0 ? "L" + root.data.level : "-";
+            color: root.data.max ? Theme.green : #c4c5d2;
+            font-weight: 600;
+            horizontal-alignment: right;
+        }
+        VerticalLayout {
+            width: 56px;
+            alignment: center;
+            spacing: 1px;
+            HudText {
+                height: 13px;
+                text: root.data.progress;
+                color: root.data.max ? Theme.green : Theme.text;
+                font-size: 10px;
+                font-weight: 600;
+                horizontal-alignment: center;
+            }
+            Rectangle {
+                height: 3px;
+                border-radius: 1.5px;
+                background: #00000080;
+                clip: true;
+                Rectangle {
+                    x: 0;
+                    width: parent.width * (root.data.max ? 1 : root.data.share);
+                    background: root.data.max ? Theme.green : Theme.accent;
+                }
+            }
+        }
+    }
+}
+
 export component PetOverlay inherits Window {
     in property <[PetRow]> rows;
     in property <string> header;
@@ -1481,6 +1630,8 @@ export component PetOverlay inherits Window {
     in property <string> empty-text;
     in property <bool> locked;
     in property <float> overlay-opacity: 0.85;
+    // a smaller overlay without a background: outlined text, no header or empty text
+    in property <bool> minimal;
     callback drag();
     callback toggle-lock();
     callback resize(int);
@@ -1491,11 +1642,11 @@ export component PetOverlay inherits Window {
     background: transparent;
     preferred-width: 340px;
     preferred-height: 150px;
-    min-width: 200px;
-    min-height: 60px;
+    min-width: root.minimal ? 160px : 200px;
+    min-height: root.minimal ? 30px : 60px;
     default-font-size: 12px;
 
-    Rectangle {
+    if !root.minimal: Rectangle {
         background: Theme.background.with-alpha(root.overlay-opacity);
         border-radius: Theme.radius;
         clip: true;
@@ -1538,6 +1689,31 @@ export component PetOverlay inherits Window {
         }
         if !root.locked: ResizeGrips { resize(edge) => { root.resize(edge); } }
     }
+
+    if root.minimal: HudFrame {
+        locked: root.locked;
+        overlay-opacity: root.overlay-opacity;
+        if !root.locked: TouchArea {
+            pointer-event(e) => {
+                if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                    root.drag();
+                }
+            }
+        }
+        VerticalLayout {
+            padding: 4px;
+            spacing: 2px;
+            alignment: start;
+            // a strip for the lock button; it stays when locked so the rows do not move
+            HorizontalLayout {
+                height: 16px;
+                alignment: end;
+                if !root.locked: HudLockButton { clicked => { root.toggle-lock(); } }
+            }
+            for row in root.rows: HudPetRow { data: row; }
+        }
+        if !root.locked: ResizeGrips { resize(edge) => { root.resize(edge); } }
+    }
 }
 
 export component MeterOverlay inherits Window {
@@ -1546,6 +1722,8 @@ export component MeterOverlay inherits Window {
     in property <string> overlay-title: "za2 DPS overlay";
     in property <bool> locked;
     in property <float> overlay-opacity: 0.85;
+    // a smaller overlay without a background: outlined text, thin share lines
+    in property <bool> minimal;
     // the player whose skills show under the rows (-1: none)
     in property <int> selected-id: -1;
     in property <string> skills-title;
@@ -1565,11 +1743,11 @@ export component MeterOverlay inherits Window {
     background: transparent;
     preferred-width: 380px;
     preferred-height: 220px;
-    min-width: 240px;
-    min-height: 80px;
+    min-width: root.minimal ? 180px : 240px;
+    min-height: root.minimal ? 40px : 80px;
     default-font-size: 12px;
 
-    Rectangle {
+    if !root.minimal: Rectangle {
         background: Theme.background.with-alpha(root.overlay-opacity);
         border-radius: Theme.radius;
         if !root.locked: TouchArea {
@@ -1654,6 +1832,88 @@ export component MeterOverlay inherits Window {
             boxed: true;
             icon: Icons.lock-open;
             clicked => { root.toggle-lock(); }
+        }
+        if !root.locked: ResizeGrips { resize(edge) => { root.resize(edge); } }
+    }
+
+    if root.minimal: HudFrame {
+        locked: root.locked;
+        overlay-opacity: root.overlay-opacity;
+        if !root.locked: TouchArea {
+            pointer-event(e) => {
+                if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                    root.drag();
+                }
+            }
+        }
+        VerticalLayout {
+            padding: 4px;
+            spacing: 2px;
+            HorizontalLayout {
+                height: 16px;
+                spacing: 4px;
+                HudText {
+                    text: root.header;
+                    color: #b4b5c4;
+                    font-size: 10px;
+                    font-weight: 600;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                if !root.locked: HudLockButton { clicked => { root.toggle-lock(); } }
+            }
+            for row in root.rows: HudOverlayRow {
+                data: row;
+                clickable: !root.locked;
+                selected: row.id == root.selected-id;
+                clicked => { root.select(row.id == root.selected-id ? -1 : row.id); }
+                drag => { root.drag(); }
+            }
+            if root.selected-id >= 0: HorizontalLayout {
+                height: 16px;
+                spacing: 4px;
+                HudText {
+                    text: root.skills-title;
+                    color: #b4b5c4;
+                    font-size: 10px;
+                    font-weight: 600;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                if !root.locked: IconButton {
+                    width: 16px;
+                    height: 16px;
+                    icon-size: 11px;
+                    icon: Icons.x;
+                    clicked => { root.select(-1); }
+                }
+            }
+            if root.selected-id >= 0: Rectangle {
+                vertical-stretch: 1;
+                border-radius: 4px;
+                background: Theme.background.with-alpha(0.6 * root.overlay-opacity);
+                ListView {
+                    for k in root.skills: VerticalLayout {
+                        padding-bottom: 2px;
+                        SkillBar { data: k; compact: true; }
+                    }
+                }
+            }
+            if root.selected-id < 0: Rectangle { }
+            if root.ttk-text != "" || root.ping-text != "": HorizontalLayout {
+                height: 14px;
+                padding-left: 2px;
+                padding-right: 2px;
+                HudText {
+                    text: root.ttk-text;
+                    color: Theme.text;
+                    font-size: 10px;
+                    font-weight: 600;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                if root.ping-text != "": HudText { text: root.ping-text; color: root.ping-color; font-size: 10px; font-weight: 600; }
+            }
         }
         if !root.locked: ResizeGrips { resize(edge) => { root.resize(edge); } }
     }
@@ -1998,6 +2258,8 @@ export component App inherits Window {
     callback clear-pins();
     callback pet-overlay-changed(bool);
     callback pet-overlay-target-changed(bool);
+    in-out property <bool> pet-overlay-minimal;
+    callback pet-overlay-minimal-changed(bool);
 
     in-out property <bool> settings-open;
     in-out property <int> settings-tab: 0;
@@ -2013,6 +2275,8 @@ export component App inherits Window {
     callback own-name-edited(string);
     callback reset-on-zone-changed(bool);
     callback meter-overlay-changed(bool);
+    in-out property <bool> meter-overlay-minimal;
+    callback meter-overlay-minimal-changed(bool);
     callback map-overlay-changed(bool);
     callback lock-changed(bool);
     callback opacity-changed(float);
@@ -3239,6 +3503,7 @@ export component App inherits Window {
                                 if root.overlay-settings-tab == 1: VerticalLayout {
                                     spacing: 6px;
                                     SwitchRow { text: "Meter overlays"; shortcut: "Ctrl O"; checked <=> root.meter-overlay; toggled(on) => { root.meter-overlay-changed(on); } }
+                                    SwitchRow { text: "Minimal style"; checked <=> root.meter-overlay-minimal; toggled(on) => { root.meter-overlay-minimal-changed(on); } }
                                     Rectangle { height: 10px; }
                                     Rectangle { height: 1px; background: Theme.border; }
                                     Rectangle { height: 10px; }
@@ -3309,6 +3574,7 @@ export component App inherits Window {
                                 if root.overlay-settings-tab == 3: VerticalLayout {
                                     spacing: 6px;
                                     SwitchRow { text: "Pet overlay"; shortcut: "Ctrl P"; checked <=> root.pet-overlay; toggled(on) => { root.pet-overlay-changed(on); } }
+                                    SwitchRow { text: "Minimal style"; checked <=> root.pet-overlay-minimal; toggled(on) => { root.pet-overlay-minimal-changed(on); } }
                                     SwitchRow { text: "Add the pet of the monster you fight"; checked <=> root.pet-overlay-target; toggled(on) => { root.pet-overlay-target-changed(on); } }
                                     SwitchRow { text: "Sync pinned pets with the monsters ticked on the map"; checked <=> root.pet-auto-pin; toggled(on) => { root.pet-auto-pin-changed(on); } }
                                 }
