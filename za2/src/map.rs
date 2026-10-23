@@ -404,8 +404,8 @@ pub struct Area {
     pub bounds: (f32, f32, f32, f32),
 }
 
-/// Splits `points` into the groups of places linked by steps of at most `AREA_LINK`.
-fn spawn_clusters(points: &[(f32, f32)]) -> Vec<Vec<(f32, f32)>> {
+/// Splits `points` into the groups of places linked by steps of at most `link`.
+fn spawn_clusters(points: &[(f32, f32)], link: f32) -> Vec<Vec<(f32, f32)>> {
     fn root(parent: &mut [usize], mut i: usize) -> usize {
         while parent[i] != i {
             parent[i] = parent[parent[i]];
@@ -417,7 +417,7 @@ fn spawn_clusters(points: &[(f32, f32)]) -> Vec<Vec<(f32, f32)>> {
     for i in 0..points.len() {
         for j in i + 1..points.len() {
             let (dx, dy) = (points[i].0 - points[j].0, points[i].1 - points[j].1);
-            if dx.abs() <= AREA_LINK && dy.abs() <= AREA_LINK && dx * dx + dy * dy <= AREA_LINK * AREA_LINK {
+            if dx.abs() <= link && dy.abs() <= link && dx * dx + dy * dy <= link * link {
                 let (a, b) = (root(&mut parent, i), root(&mut parent, j));
                 parent[a] = b;
             }
@@ -473,6 +473,9 @@ fn rounded_outline(points: &[(f32, f32)]) -> Vec<(f32, f32)> {
 
 /// Gathering places of one resource this many or more close together are drawn as an area.
 const GATHER_AREA_MIN: usize = 3;
+/// Gathering places are linked into one area over steps of up to this (world units): coarser than the monsters'
+/// `AREA_LINK`, since a resource has hundreds of places spread over a region (Altgard's gemstones make 3 or 4 areas).
+const GATHER_AREA_LINK: f32 = 15_000.0;
 
 /// The area around one group of places.
 fn area(label: &str, color: (u8, u8, u8), cluster: &[(f32, f32)]) -> Area {
@@ -482,7 +485,7 @@ fn area(label: &str, color: (u8, u8, u8), cluster: &[(f32, f32)]) -> Area {
 }
 
 pub fn spawn_areas(label: &str, color: (u8, u8, u8), points: &[(f32, f32)]) -> Vec<Area> {
-    spawn_clusters(points).into_iter().map(|cluster| area(label, color, &cluster)).collect()
+    spawn_clusters(points, AREA_LINK).into_iter().map(|cluster| area(label, color, &cluster)).collect()
 }
 
 /// The icon of a monster: its portrait, else the portrait of its pet (none: drawn as the monster glyph).
@@ -541,7 +544,7 @@ impl StaticLayer {
                 self.gather.extend(points.iter().map(|&(x, y)| (item, x, y, color, false)));
                 continue;
             }
-            for cluster in spawn_clusters(points) {
+            for cluster in spawn_clusters(points, GATHER_AREA_LINK) {
                 let in_area = cluster.len() >= GATHER_AREA_MIN;
                 if in_area {
                     self.areas.push(area(item.name_in("en"), color, &cluster));

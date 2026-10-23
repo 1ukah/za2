@@ -27,14 +27,7 @@ pub struct TimedEvent {
     pub kind: String,
     #[serde(default)]
     pub note: String,
-    /// False: no in-game or packet confirmation for this region yet.
-    #[serde(default = "yes")]
-    pub verified: bool,
     pub rule: Rule,
-}
-
-fn yes() -> bool {
-    true
 }
 
 /// When an event starts and how long it is on ("HH:MM" in the region's clock; days 0 = Sunday ... 6 = Saturday).
@@ -115,20 +108,25 @@ impl Rule {
 }
 
 impl Schedule {
-    /// The occurrence of `event` that is on at `now` (UTC unix ms), else the next one (within a week).
-    pub fn current_or_next(&self, event: &TimedEvent, now: i64) -> Option<Occurrence> {
+    /// The occurrences of `event` from a week before `now` (UTC unix ms) to a week after.
+    fn around(&self, event: &TimedEvent, now: i64) -> impl Iterator<Item = Occurrence> {
         let shift = self.utc_offset_minutes * MINUTE_MS;
-        let local_now = now + shift;
-        let today = local_now.div_euclid(DAY_MS);
+        let today = (now + shift).div_euclid(DAY_MS);
         let mut starts = Vec::new();
-        for day in today - 1..=today + 7 {
+        for day in today - 7..=today + 7 {
             event.rule.on_day(day, &mut starts);
         }
-        starts
-            .into_iter()
-            .map(|(start, length)| Occurrence { start: start - shift, end: start - shift + length })
-            .filter(|o| o.is_on(now) || o.start > now)
-            .min_by_key(|o| (!o.is_on(now), o.start))
+        starts.into_iter().map(move |(start, length)| Occurrence { start: start - shift, end: start - shift + length })
+    }
+
+    /// The occurrence of `event` that is on at `now` (UTC unix ms), else the next one (within a week).
+    pub fn current_or_next(&self, event: &TimedEvent, now: i64) -> Option<Occurrence> {
+        self.around(event, now).filter(|o| o.is_on(now) || o.start > now).min_by_key(|o| (!o.is_on(now), o.start))
+    }
+
+    /// The last occurrence of `event` that started before `now` and is not on any more (within a week).
+    pub fn previous(&self, event: &TimedEvent, now: i64) -> Option<Occurrence> {
+        self.around(event, now).filter(|o| o.start <= now && !o.is_on(now)).max_by_key(|o| o.start)
     }
 
     /// Unix ms as the region's clock: (weekday 0 = Sunday, hour, minute, days from `now`'s local day).
@@ -186,6 +184,14 @@ mod tests {
     }
 
     #[test]
+    fn the_previous_one_is_over() {
+        let o = sa().previous(event("spacetime_rift"), NOW).unwrap();
+        assert_eq!(sa().local_time(o.start, NOW), (4, 17, 0, 0));
+        let o = sa().previous(event("weekly_reset"), NOW).unwrap();
+        assert_eq!(sa().local_time(o.start, NOW), (3, 4, 0, -1));
+    }
+
+    #[test]
     fn rift_every_three_hours_from_two() {
         let o = sa().current_or_next(event("spacetime_rift"), NOW).unwrap();
         assert_eq!(sa().local_time(o.start, NOW), (4, 20, 0, 0));
@@ -194,7 +200,7 @@ mod tests {
     #[test]
     fn a_window_is_on_until_its_end() {
         let rule = Rule::Windows { windows: vec![Window { start: "11:00".into(), end: "14:00".into() }] };
-        let battlefield = TimedEvent { id: "x".into(), name: "x".into(), kind: "pvp".into(), note: String::new(), verified: true, rule };
+        let battlefield = TimedEvent { id: "x".into(), name: "x".into(), kind: "pvp".into(), note: String::new(), rule };
         let noon = NOW - 6 * HOUR_MS;
         let o = sa().current_or_next(&battlefield, noon).unwrap();
         assert!(o.is_on(noon));
