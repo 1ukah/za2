@@ -1,9 +1,5 @@
 # za2 - zodiak for Aion 2
 
-<p align="center">
-  <img width="96" height="96" alt="za2 icon" src="za2/ui/brand/icon.png" />
-</p>
-
 za2 is a DPS meter and interactive map for Aion 2 on Linux. It reads the game traffic and shows the damage, healing and skills of each player.
 
 ## Features
